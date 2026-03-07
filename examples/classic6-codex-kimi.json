@@ -1,0 +1,34 @@
+{
+  "preset": "classic-6",
+  "participants": {
+    "p1": {
+      "type": "codex_cli",
+      "name": "Codex Seat P1",
+      "background": "Play fast, stay in character, and always return strict JSON.",
+      "sandbox": "read-only"
+    },
+    "p2": {
+      "type": "kimi_cli",
+      "name": "Kimi Seat P2",
+      "share_dir": "/tmp/wolfkill-kimi-p2",
+      "background": "Play cautiously, use only visible information, and return strict JSON.",
+      "model": "kimi-code/kimi-for-coding"
+    },
+    "p3": {
+      "type": "mock",
+      "name": "Mock P3"
+    },
+    "p4": {
+      "type": "mock",
+      "name": "Mock P4"
+    },
+    "p5": {
+      "type": "mock",
+      "name": "Mock P5"
+    },
+    "p6": {
+      "type": "mock",
+      "name": "Mock P6"
+    }
+  }
+}

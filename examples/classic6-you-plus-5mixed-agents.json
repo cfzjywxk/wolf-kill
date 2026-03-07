@@ -1,0 +1,38 @@
+{
+  "preset": "classic-6",
+  "narration_delay_seconds": 1,
+  "participants": {
+    "p2": {
+      "type": "codex_cli",
+      "name": "Codex P2",
+      "background": "Play fast, stay in character, and return strict JSON.",
+      "sandbox": "read-only"
+    },
+    "p3": {
+      "type": "codex_cli",
+      "name": "Codex P3",
+      "background": "Use only visible information and return strict JSON.",
+      "sandbox": "read-only"
+    },
+    "p4": {
+      "type": "kimi_cli",
+      "name": "Kimi P4",
+      "share_dir": "/tmp/wolfkill-kimi-p4",
+      "background": "Play cautiously and return strict JSON.",
+      "model": "kimi-code/kimi-for-coding"
+    },
+    "p5": {
+      "type": "kimi_cli",
+      "name": "Kimi P5",
+      "share_dir": "/tmp/wolfkill-kimi-p5",
+      "background": "Reason only from visible state and return strict JSON.",
+      "model": "kimi-code/kimi-for-coding"
+    },
+    "p6": {
+      "type": "codex_cli",
+      "name": "Codex P6",
+      "background": "Stay in character and return strict JSON.",
+      "sandbox": "read-only"
+    }
+  }
+}
