@@ -144,6 +144,18 @@ class HumanCliParticipant(ParticipantAdapter):
 
     def speak(self, request: dict[str, Any]) -> dict[str, Any]:
         self._show_context(request)
+        if request.get("phase") == "WOLF_CHAT":
+            print("【法官】可选操作：")
+            print("  1. 继续讨论并输入发言")
+            print("  2. 无更多讨论")
+            raw = input("选择> ").strip()
+            if raw == "2":
+                return {"text": "无更多讨论"}
+            if raw not in {"", "1"}:
+                return {"text": raw}
+            print("【法官】请直接输入你的狼人密谈内容。")
+            text = input("发言> ").strip()
+            return {"text": text or "无更多讨论"}
         print("【法官】请直接输入你的发言内容。")
         text = input("发言> ").strip()
         return {"text": text or "我先不发言。"}

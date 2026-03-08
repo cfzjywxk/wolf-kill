@@ -74,6 +74,7 @@ class GameEngine:
 
     def run(self) -> GameState:
         self._announce_game_intro()
+        self.gateway.bootstrap_sessions(self.state)
         while self.state.winner is None and self.state.day <= self.max_days:
             self._run_night()
             if self._finalize_if_winner():
@@ -303,6 +304,7 @@ class GameEngine:
 
     def _wolf_chat_done(self, text: str) -> bool:
         normalized = ''.join(ch for ch in str(text).strip() if not ch.isspace())
+        normalized = normalized.strip("\"“”'‘’").rstrip("。！？!?,，；;、…~～.")
         return normalized in {"无更多讨论", "没有更多讨论", "无更多可讨论", "无更多可补充"}
 
     def _wolf_action_summary(self) -> str:

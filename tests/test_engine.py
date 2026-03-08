@@ -238,6 +238,30 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(wolf_chat_events), 2)
         self.assertTrue(all(event.text == '无更多讨论' for event in wolf_chat_events))
 
+    def test_wolf_chat_stops_early_when_no_more_discussion_has_trailing_punctuation(self) -> None:
+        class PunctuatedWolf(MockParticipant):
+            def speak(self, request):
+                return {"text": "无更多讨论。"}
+
+        state = create_state_from_role_map("classic-6", 7, {"p1": Role.WOLF, "p2": Role.WOLF, "p3": Role.SEER, "p4": Role.WITCH, "p5": Role.VILLAGER, "p6": Role.VILLAGER})
+        participants = {
+            "p1": PunctuatedWolf("Wolf p1", seed=7),
+            "p2": PunctuatedWolf("Wolf p2", seed=8),
+            "p3": MockParticipant("Mock p3", seed=9),
+            "p4": MockParticipant("Mock p4", seed=10),
+            "p5": MockParticipant("Mock p5", seed=11),
+            "p6": MockParticipant("Mock p6", seed=12),
+        }
+        gateway = ParticipantGateway(participants, VisibilityCompiler())
+        engine = GameEngine(state, gateway)
+
+        with redirect_stdout(io.StringIO()):
+            engine._run_night()
+
+        wolf_chat_events = [event for event in state.transcript if event.phase == Phase.WOLF_CHAT and event.channel == 'wolf']
+        self.assertEqual(len(wolf_chat_events), 2)
+        self.assertTrue(all(event.text == '无更多讨论。' for event in wolf_chat_events))
+
     def test_wolf_chat_caps_at_five_rounds_when_discussion_continues(self) -> None:
         class TalkativeWolf(MockParticipant):
             def __init__(self, name: str, seed: int = 0):

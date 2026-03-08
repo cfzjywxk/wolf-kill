@@ -32,6 +32,44 @@ class ParticipantGateway:
         self._hidden_night_announced_day: int | None = None
         self._hidden_night_clock_day: int | None = None
 
+    def bootstrap_sessions(self, state) -> None:
+        ai_items = [(seat, adapter) for seat, adapter in self.participants.items() if not isinstance(adapter, HumanCliParticipant)]
+        if not ai_items:
+            return
+        lock = threading.Lock()
+
+        def _bootstrap_one(seat: str, adapter: ParticipantAdapter) -> None:
+            adapter.clear_last_call_diagnostics()
+            adapter.clear_last_call_exchange()
+            request = self._build_base_request(state, seat, "这是赛前初始化同步。请阅读并记住当前身份、规则、座位顺序与已有历史；后续游戏只会增量提供新事件。请只返回 JSON：{\"text\":\"已同步\"}。")
+            request["audience"] = Audience.PUBLIC.value
+            issue_message = None
+            issue_kind = None
+            fallback_used = False
+            try:
+                response = adapter.speak(request)
+                final_response = {"text": str(response.get("text", "")).strip() or "已同步"}
+            except Exception as exc:
+                issue_message = str(exc).strip() or exc.__class__.__name__
+                issue_kind = getattr(exc, "kind", None) or self._issue_kind(issue_message)
+                fallback_used = True
+                adapter.reset_state()
+                with lock:
+                    self._record_exception(seat, "speech", exc)
+                final_response = {"text": "初始化失败"}
+            diagnostics_snapshot = dict(adapter.last_call_diagnostics or {})
+            exchange_snapshot = dict(adapter.last_call_exchange or {})
+            adapter.clear_last_call_exchange()
+            self._log_agent_call(seat=seat, adapter=adapter, mode="bootstrap", request=request, diagnostics=diagnostics_snapshot, exchange=exchange_snapshot, final_response=final_response, issue_message=issue_message, issue_kind=issue_kind, fallback_used=fallback_used)
+
+        threads = []
+        for seat, adapter in ai_items:
+            thread = threading.Thread(target=_bootstrap_one, args=(seat, adapter))
+            threads.append(thread)
+            thread.start()
+        for thread in threads:
+            thread.join()
+
     def request_speech(self, state, seat: str, audience: Audience, prompt: str) -> str:
         started_at = time.monotonic()
         pause_before = self.total_pause_seconds

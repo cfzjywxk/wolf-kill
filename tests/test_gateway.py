@@ -67,6 +67,79 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(agent_entry["request"]["phase"], Phase.DAY_SPEECH.value)
         self.assertEqual(agent_entry["final_response"]["text"], "测试发言")
 
+    def test_bootstrap_sessions_primes_ai_context_and_next_request_is_incremental(self) -> None:
+        class SessionParticipant(ParticipantAdapter):
+            def __init__(self, name: str):
+                super().__init__(name)
+                self.calls = []
+                self._has_session = True
+
+            @property
+            def has_session(self) -> bool:
+                return self._has_session
+
+            def speak(self, request):
+                self.calls.append(request)
+                self.set_last_call_diagnostics(provider="session_participant", mode="speech", context_mode=request.get("context_mode"), prompt_chars=10, response_chars=10, provider_seconds=0.01, io_wait_seconds=0.01, parse_seconds=0.0, total_seconds=0.01)
+                self.set_last_call_exchange(mode="speech", prompt="bootstrap or speech", raw_output='{"text":"ok"}', parsed_response={"text":"ok"}, parse_mode="json")
+                return {"text": "ok"}
+
+            def decide(self, request):
+                self.calls.append(request)
+                self.set_last_call_diagnostics(provider="session_participant", mode="decision", context_mode=request.get("context_mode"), prompt_chars=10, response_chars=10, provider_seconds=0.01, io_wait_seconds=0.01, parse_seconds=0.0, total_seconds=0.01)
+                self.set_last_call_exchange(mode="decision", prompt="decision", raw_output='{"action_type":"NO_OP","target":null}', parsed_response={"action_type":"NO_OP","target":None}, parse_mode="json")
+                return {"action_type": "NO_OP", "target": None}
+
+        state = self._state()
+        participant = SessionParticipant("session")
+        gateway = ParticipantGateway({"p1": participant}, VisibilityCompiler(), learn_history=["guide"])
+        state.add_event(visibility=EventVisibility.PUBLIC, channel="system", text="开局公开信息")
+
+        with redirect_stdout(io.StringIO()):
+            gateway.bootstrap_sessions(state)
+
+        self.assertEqual(len(participant.calls), 1)
+        self.assertEqual(participant.calls[0]["context_mode"], "full")
+        self.assertIn("strategy_briefing", participant.calls[0])
+
+        state.phase = Phase.DAY_SPEECH
+        state.add_event(visibility=EventVisibility.PUBLIC, channel="speech", text="新的公开发言", speaker="p2")
+        request = gateway._build_base_request(state, "p1", "请发言")
+        self.assertEqual(request["context_mode"], "incremental")
+        self.assertNotIn("strategy_briefing", request)
+        self.assertIn("new_public_events", request["public_state"])
+
+    def test_bootstrap_failure_resets_session_participant_to_full_context(self) -> None:
+        class FailingSessionParticipant(ParticipantAdapter):
+            def __init__(self, name: str):
+                super().__init__(name)
+                self._session_id = 1
+
+            @property
+            def has_session(self) -> bool:
+                return self._session_id is not None
+
+            def reset_state(self) -> None:
+                super().reset_state()
+                self._session_id = None
+
+            def speak(self, request):
+                raise RuntimeError("bootstrap boom")
+
+            def decide(self, request):
+                return {"action_type": "NO_OP", "target": None}
+
+        state = self._state()
+        participant = FailingSessionParticipant("failing")
+        gateway = ParticipantGateway({"p1": participant}, VisibilityCompiler())
+        state.add_event(visibility=EventVisibility.PUBLIC, channel="system", text="开局公开信息")
+
+        with redirect_stdout(io.StringIO()):
+            gateway.bootstrap_sessions(state)
+
+        request = gateway._build_base_request(state, "p1", "请发言")
+        self.assertEqual(request["context_mode"], "full")
+
     def test_gateway_prints_waiting_status_for_speech(self) -> None:
         state = self._state()
         state.phase = Phase.DAY_SPEECH
@@ -189,6 +262,57 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(events, ["pause"])
         self.assertIn("hello", stream.getvalue())
+
+    def test_human_wolf_chat_can_end_with_numeric_shortcut(self) -> None:
+        import builtins
+        human = HumanCliParticipant("你")
+        request = {
+            "seat": "p1",
+            "name": "你",
+            "day": 1,
+            "phase": Phase.WOLF_CHAT.value,
+            "phase_label": "狼人密谈",
+            "prompt": "【第2轮讨论】请回应队友建议，确认或调整击杀目标；若你已无更多讨论内容，请直接回复：无更多讨论。",
+            "private_view": {
+                "seat": "p1",
+                "role": Role.WOLF.value,
+                "team": "WOLF",
+                "alive": True,
+                "role_label": "狼人",
+                "team_label": "狼人阵营",
+                "alive_label": "是",
+                "teammates": [{"seat": "p2"}],
+                "all_visible_events": [],
+            },
+        }
+        with patch.object(builtins, 'input', return_value='2'), redirect_stdout(io.StringIO()):
+            response = human.speak(request)
+        self.assertEqual(response["text"], "无更多讨论")
+
+    def test_human_day_speech_still_accepts_free_text(self) -> None:
+        import builtins
+        human = HumanCliParticipant("你")
+        request = {
+            "seat": "p1",
+            "name": "你",
+            "day": 1,
+            "phase": Phase.DAY_SPEECH.value,
+            "phase_label": "白天发言",
+            "prompt": "请根据当前局势发表白天发言。",
+            "private_view": {
+                "seat": "p1",
+                "role": Role.VILLAGER.value,
+                "team": "VILLAGE",
+                "alive": True,
+                "role_label": "平民",
+                "team_label": "好人阵营",
+                "alive_label": "是",
+                "all_visible_events": [],
+            },
+        }
+        with patch.object(builtins, 'input', return_value='我有一个判断'), redirect_stdout(io.StringIO()):
+            response = human.speak(request)
+        self.assertEqual(response["text"], '我有一个判断')
 
     def test_gateway_hidden_wait_prints_generic_message_once_per_wait(self) -> None:
         state = self._state()
