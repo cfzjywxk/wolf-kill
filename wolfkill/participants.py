@@ -280,7 +280,14 @@ class PromptJsonParticipant(ParticipantAdapter, ABC):
             raise ParticipantInvocationError(f"{self.provider_label} 返回空输出", kind="invalid_response")
         try:
             parse_started_at = time.monotonic()
-            response = parse_json_response(raw_output)
+            parse_mode = "json"
+            try:
+                response = parse_json_response(raw_output)
+            except ValueError:
+                response = coerce_non_json_response(raw_output, mode=mode, request=request)
+                if response is None:
+                    raise
+                parse_mode = "text_fallback"
             parse_seconds = time.monotonic() - parse_started_at
             run_prompt_meta = self._consume_run_prompt_meta()
             io_wait_seconds = float(run_prompt_meta.pop("io_wait_seconds", provider_seconds))
@@ -294,6 +301,7 @@ class PromptJsonParticipant(ParticipantAdapter, ABC):
                 provider_seconds=provider_seconds,
                 io_wait_seconds=io_wait_seconds,
                 parse_seconds=parse_seconds,
+                parse_mode=parse_mode,
                 total_seconds=time.monotonic() - started_at,
                 **run_prompt_meta,
             )
@@ -885,6 +893,15 @@ def parse_json_response(raw_text: str) -> dict[str, Any]:
     raise ValueError(f"无法从输出中解析 JSON 对象：{raw_text[:280]}")
 
 
+def coerce_non_json_response(raw_text: str, *, mode: str, request: dict[str, Any]) -> dict[str, Any] | None:
+    text = _normalize_freeform_response(raw_text)
+    if not text or _looks_like_provider_error_text(text):
+        return None
+    if mode == "speech":
+        return {"text": text[:600]}
+    return _coerce_decision_response(text, request)
+
+
 def _json_candidates(raw_text: str) -> list[str]:
     stripped = raw_text.strip()
     if not stripped:
@@ -900,6 +917,193 @@ def _json_candidates(raw_text: str) -> list[str]:
     if 0 <= start < end:
         candidates.append(stripped[start:end + 1].strip())
     return candidates
+
+
+def _normalize_freeform_response(raw_text: str) -> str:
+    stripped = raw_text.strip()
+    if not stripped:
+        return ""
+    fenced_matches = list(re.finditer(r"```(?:json)?\s*(.*?)```", stripped, flags=re.IGNORECASE | re.DOTALL))
+    if len(fenced_matches) == 1:
+        fenced = fenced_matches[0].group(1).strip()
+        if fenced:
+            stripped = fenced
+    text_wrapper = _unwrap_text_field_wrapper(stripped)
+    return text_wrapper if text_wrapper else stripped
+
+
+def _looks_like_provider_error_text(text: str) -> bool:
+    lowered = text.lower().strip()
+    error_markers = (
+        "error code:",
+        "invalid authentication",
+        "invalid_authentication_error",
+        "llm not set",
+        "traceback",
+        "exception:",
+        "rate limit",
+        "too many requests",
+        "quota",
+        "timed out",
+        "timeout",
+        "unauthorized",
+        "forbidden",
+        "connection refused",
+        "network error",
+        "api key",
+    )
+    return any(marker in lowered for marker in error_markers)
+
+
+def _unwrap_text_field_wrapper(text: str) -> str | None:
+    match = re.match(r'^\{\s*"text"\s*:\s*"(?P<body>.*)"\s*\}\s*$', text, flags=re.DOTALL)
+    if not match:
+        return None
+    body = match.group('body').strip()
+    if not body:
+        return ""
+    body = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), body)
+    body = body.replace('\\n', '\n')
+    body = body.replace('\\r', '\r')
+    body = body.replace('\\t', '\t')
+    body = body.replace('\\"', '"')
+    return body.replace('\\\\', '\\')
+
+_SEAT_CAPTURE_PATTERN = r"(?:\[(?P<bracket>\d+)\]|p(?P<prefix>\d+)|(?P<plain>\d+)号位)"
+
+
+def _coerce_decision_response(text: str, request: dict[str, Any]) -> dict[str, Any] | None:
+    options = request.get("options")
+    if not isinstance(options, list) or not options:
+        return None
+    explicit = _extract_explicit_action_and_target(text)
+    if explicit is not None:
+        action_type, target = explicit
+        if _decision_matches_options(options, action_type, target):
+            return {"action_type": action_type, "target": target}
+
+    no_op_option = next((item for item in options if item.get("action_type") == ActionType.NO_OP.value), None)
+    if no_op_option and _mentions_no_op(text):
+        return {"action_type": ActionType.NO_OP.value, "target": None}
+
+    for action_type in _infer_action_types(text, options):
+        target = _extract_target_for_action(text, action_type)
+        if target is None:
+            target = _infer_target_from_request_context(action_type, request, options)
+        if _decision_matches_options(options, action_type, target):
+            return {"action_type": action_type, "target": target}
+
+    unique_seats = _extract_unique_seats(text)
+    if len(unique_seats) == 1:
+        seat = unique_seats[0]
+        target_matches = [item for item in options if item.get("requires_target") and seat in item.get("targets", [])]
+        if len(target_matches) == 1:
+            return {"action_type": str(target_matches[0]["action_type"]), "target": seat}
+    return None
+
+
+def _extract_explicit_action_and_target(text: str) -> tuple[str, str | None] | None:
+    action_match = re.search(r"\b(WOLF_KILL|SEER_INSPECT|WITCH_SAVE|WITCH_POISON|DAY_VOTE|NO_OP)\b", text)
+    if not action_match:
+        return None
+    action_type = action_match.group(1)
+    target_match = re.search(r"\btarget\b\s*[:=]\s*(null|\"?p\d+\"?)", text, flags=re.IGNORECASE)
+    if target_match:
+        raw_target = target_match.group(1).strip('"').lower()
+        return action_type, None if raw_target == "null" else raw_target
+    return action_type, _extract_target_for_action(text, action_type)
+
+
+def _infer_action_types(text: str, options: list[dict[str, Any]]) -> list[str]:
+    lowered = text.lower()
+    action_types = {str(item.get("action_type")) for item in options}
+    ordered: list[str] = []
+    keyword_map = [
+        (ActionType.WITCH_SAVE.value, ("开药救", "用解药", "解药", "救人", "救", "save", "heal")),
+        (ActionType.WITCH_POISON.value, ("下毒", "毒药", "毒杀", "毒", "poison")),
+        (ActionType.DAY_VOTE.value, ("票投向", "投票给", "投给", "今天投", "票给", "主推", "vote", "push")),
+        (ActionType.WOLF_KILL.value, ("刀口", "击杀", "今晚刀", "主刀", "刀", "kill")),
+        (ActionType.SEER_INSPECT.value, ("查验", "验人", "验", "查", "inspect")),
+        (ActionType.NO_OP.value, ("不操作", "不使用", "不用", "跳过", "skip", "no op", "no-op", "弃票", "空刀")),
+    ]
+    for action_type, keywords in keyword_map:
+        if action_type in action_types and any(keyword in lowered for keyword in keywords):
+            ordered.append(action_type)
+    if not ordered:
+        non_noop = [str(item.get("action_type")) for item in options if item.get("action_type") != ActionType.NO_OP.value]
+        if len(set(non_noop)) == 1:
+            ordered.append(non_noop[0])
+    return ordered
+
+
+def _extract_target_for_action(text: str, action_type: str) -> str | None:
+    action_patterns: dict[str, tuple[str, ...]] = {
+        ActionType.WITCH_SAVE.value: (
+            rf"(?:开药救|用解药(?:救)?|解药(?:救)?|save|heal|救(?:人)?)\s*(?:->|给|向|to|for)?\s*{_SEAT_CAPTURE_PATTERN}",
+        ),
+        ActionType.WITCH_POISON.value: (
+            rf"(?:下毒|用毒(?:药)?|毒杀|毒(?:死)?|poison)\s*(?:->|给|向|to|for)?\s*{_SEAT_CAPTURE_PATTERN}",
+        ),
+        ActionType.DAY_VOTE.value: (
+            rf"(?:票投向|投票给|投给|今天投|票给|主推|vote(?:\s+for)?|push)\s*(?:->|给|向|to|for)?\s*{_SEAT_CAPTURE_PATTERN}",
+        ),
+        ActionType.WOLF_KILL.value: (
+            rf"(?:今晚刀|主刀|刀口(?:定)?(?:在)?|击杀|刀|kill)\s*(?:->|给|向|to|for)?\s*{_SEAT_CAPTURE_PATTERN}",
+        ),
+        ActionType.SEER_INSPECT.value: (
+            rf"(?:查验|验人|验|查|inspect)\s*(?:->|给|向|to|for)?\s*{_SEAT_CAPTURE_PATTERN}",
+        ),
+    }
+    for pattern in action_patterns.get(action_type, ()):
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return _seat_from_match(match)
+    return None
+
+
+def _infer_target_from_request_context(action_type: str, request: dict[str, Any], options: list[dict[str, Any]]) -> str | None:
+    if action_type != ActionType.WITCH_SAVE.value:
+        return None
+    private_view = request.get("private_view") if isinstance(request.get("private_view"), dict) else {}
+    night_hint = private_view.get("night_hint") if isinstance(private_view, dict) else None
+    wolf_target = night_hint.get("wolf_target") if isinstance(night_hint, dict) else None
+    if not isinstance(wolf_target, str):
+        return None
+    if _decision_matches_options(options, action_type, wolf_target):
+        return wolf_target
+    return None
+
+
+def _extract_unique_seats(text: str) -> list[str]:
+    seats: list[str] = []
+    for match in re.finditer(_SEAT_CAPTURE_PATTERN, text, flags=re.IGNORECASE):
+        seat = _seat_from_match(match)
+        if seat not in seats:
+            seats.append(seat)
+    return seats
+
+
+def _seat_from_match(match: re.Match[str]) -> str:
+    number = match.group("bracket") or match.group("prefix") or match.group("plain")
+    return f"p{int(number)}"
+
+
+def _decision_matches_options(options: list[dict[str, Any]], action_type: str, target: str | None) -> bool:
+    for item in options:
+        if str(item.get("action_type")) != action_type:
+            continue
+        requires_target = bool(item.get("requires_target"))
+        targets = [str(value) for value in item.get("targets", [])]
+        if not requires_target:
+            return target is None
+        if isinstance(target, str) and target in targets:
+            return True
+    return False
+
+
+def _mentions_no_op(text: str) -> bool:
+    lowered = text.lower()
+    return any(token in lowered for token in ("不操作", "不使用", "不用", "跳过", "skip", "no op", "no-op", "弃票", "空刀", "今晚不使用技能"))
 
 
 def _process_error(provider_label: str, completed: subprocess.CompletedProcess[str]) -> ParticipantInvocationError:

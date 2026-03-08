@@ -100,6 +100,73 @@ class ParticipantAdapterTests(unittest.TestCase):
         self.assertEqual(response["text"], "structured ok")
         self.assertEqual(participant.session_id, "claude-session-structured")
 
+    def test_claude_cli_participant_falls_back_to_plaintext_speech(self) -> None:
+        participant = ClaudeCliParticipant(name="Claude Freeform Speech", cwd="/tmp/wolfkill-claude")
+
+        def fake_run(command, **kwargs):
+            import json
+            payload = json.dumps({
+                "session_id": "claude-session-freeform-speech",
+                "result": "我是预言家，昨晚验了2号是狼人。今天主推2号，大家别散票。",
+            }, ensure_ascii=False)
+            return subprocess.CompletedProcess(command, 0, stdout=payload, stderr="")
+
+        with patch("wolfkill.participants.subprocess.run", side_effect=fake_run):
+            response = participant.speak(self.speech_request)
+
+        self.assertEqual(response["text"], "我是预言家，昨晚验了2号是狼人。今天主推2号，大家别散票。")
+
+    def test_claude_cli_participant_falls_back_to_plaintext_vote_decision(self) -> None:
+        participant = ClaudeCliParticipant(name="Claude Freeform Vote", cwd="/tmp/wolfkill-claude")
+
+        def fake_run(command, **kwargs):
+            import json
+            payload = json.dumps({
+                "session_id": "claude-session-freeform-vote",
+                "result": "我的票投向p2。p5和p6在误导框架下攻击我，这不影响我今天定票2号。",
+            }, ensure_ascii=False)
+            return subprocess.CompletedProcess(command, 0, stdout=payload, stderr="")
+
+        with patch("wolfkill.participants.subprocess.run", side_effect=fake_run):
+            response = participant.decide(self.decision_request)
+
+        self.assertEqual(response["action_type"], "DAY_VOTE")
+        self.assertEqual(response["target"], "p2")
+
+    def test_claude_cli_plaintext_error_is_not_coerced_to_speech(self) -> None:
+        participant = ClaudeCliParticipant(name="Claude Plain Error", cwd="/tmp/wolfkill-claude")
+
+        def fake_run(command, **kwargs):
+            import json
+            payload = json.dumps({
+                "session_id": "claude-session-error",
+                "result": "Error code: 401 - invalid authentication",
+            })
+            return subprocess.CompletedProcess(command, 0, stdout=payload, stderr="")
+
+        with patch("wolfkill.participants.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(ParticipantInvocationError) as ctx:
+                participant.speak(self.speech_request)
+
+        self.assertEqual(ctx.exception.kind, "invalid_response")
+        self.assertIn("不是 JSON", str(ctx.exception))
+
+    def test_claude_cli_participant_unwraps_malformed_text_json_shell(self) -> None:
+        participant = ClaudeCliParticipant(name="Claude Malformed Shell", cwd="/tmp/wolfkill-claude")
+
+        def fake_run(command, **kwargs):
+            import json
+            payload = json.dumps({
+                "session_id": "claude-session-malformed-shell",
+                "result": '{"text": "我是预言家，我觉得[2]是狼。你们别被"没逻辑强行带节奏"这句话带偏。"}',
+            }, ensure_ascii=False)
+            return subprocess.CompletedProcess(command, 0, stdout=payload, stderr="")
+
+        with patch("wolfkill.participants.subprocess.run", side_effect=fake_run):
+            response = participant.speak(self.speech_request)
+
+        self.assertEqual(response["text"], '我是预言家，我觉得[2]是狼。你们别被"没逻辑强行带节奏"这句话带偏。')
+
     def test_claude_cli_participant_resumes_same_session(self) -> None:
         participant = ClaudeCliParticipant(name="Claude Resume", cwd="/tmp/wolfkill-claude")
         participant.session_id = "claude-session-1"
@@ -177,6 +244,68 @@ class ParticipantAdapterTests(unittest.TestCase):
         import json
         raw = json.dumps({"role": "assistant", "content": [{"type": "think", "think": "..."}, {"type": "text", "text": json.dumps({"text": "ok"}, ensure_ascii=False)}]}, ensure_ascii=False)
         self.assertEqual(participant._unwrap_stream_json(raw), '{"text": "ok"}')
+
+    def test_kimi_cli_participant_falls_back_to_plaintext_witch_save_decision(self) -> None:
+        participant = KimiCliParticipant(name="Kimi Witch Save", model="moonshot-test")
+        request = {
+            **self.decision_request,
+            "phase": "WITCH_ACTION",
+            "private_view": {
+                **self.decision_request["private_view"],
+                "seat": "p6",
+                "role": "WITCH",
+                "team": "VILLAGE",
+                "night_hint": {"wolf_target": "p1"},
+            },
+            "options": [
+                {"action_type": "WITCH_SAVE", "targets": ["p1"], "requires_target": True, "description": "使用解药救人"},
+                {"action_type": "WITCH_POISON", "targets": ["p2", "p3"], "requires_target": True, "description": "使用毒药毒人"},
+                {"action_type": "NO_OP", "targets": [], "requires_target": False, "description": "今晚不使用技能"},
+            ],
+        }
+
+        def fake_run(command, **kwargs):
+            import json
+            payload = json.dumps({
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Based on the night hint, the wolf target is p1. As the witch, first-night save is high value here, so I choose to save p1 tonight."},
+                ],
+            }, ensure_ascii=False)
+            return subprocess.CompletedProcess(command, 0, stdout=payload, stderr="")
+
+        with patch("wolfkill.participants.subprocess.run", side_effect=fake_run):
+            response = participant.decide(request)
+
+        self.assertEqual(response["action_type"], "WITCH_SAVE")
+        self.assertEqual(response["target"], "p1")
+
+    def test_kimi_cli_participant_falls_back_to_plaintext_no_op_decision(self) -> None:
+        participant = KimiCliParticipant(name="Kimi NoOp", model="moonshot-test")
+        request = {
+            **self.decision_request,
+            "phase": "WITCH_ACTION",
+            "options": [
+                {"action_type": "WITCH_SAVE", "targets": ["p1"], "requires_target": True, "description": "使用解药救人"},
+                {"action_type": "NO_OP", "targets": [], "requires_target": False, "description": "今晚不使用技能"},
+            ],
+        }
+
+        def fake_run(command, **kwargs):
+            import json
+            payload = json.dumps({
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "今晚不使用技能。"},
+                ],
+            }, ensure_ascii=False)
+            return subprocess.CompletedProcess(command, 0, stdout=payload, stderr="")
+
+        with patch("wolfkill.participants.subprocess.run", side_effect=fake_run):
+            response = participant.decide(request)
+
+        self.assertEqual(response["action_type"], "NO_OP")
+        self.assertIsNone(response["target"])
 
     def test_kimi_cli_uses_default_model_from_config_file(self) -> None:
         import tempfile
