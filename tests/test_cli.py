@@ -111,5 +111,13 @@ class CliTests(unittest.TestCase):
                 verify_kimi_cli_ready(participant)
         self.assertIn('未配置 model', str(ctx.exception))
 
+    def test_verify_kimi_cli_ready_fails_fast_on_invalid_authentication(self) -> None:
+        from wolfkill.participants import KimiCliParticipant, verify_kimi_cli_ready
+        participant = KimiCliParticipant(name='Kimi P2', model='kimi-code/kimi-for-coding')
+        with patch('wolfkill.participants.shutil.which', return_value='/usr/bin/kimi'), patch('wolfkill.participants.subprocess.run', return_value=__import__('subprocess').CompletedProcess(['kimi'], 0, stdout="Error code: 401 - {'error': {'message': 'Invalid Authentication', 'type': 'invalid_authentication_error'}}", stderr='')):
+            with self.assertRaises(RuntimeError) as ctx:
+                verify_kimi_cli_ready(participant)
+        self.assertIn('Invalid Authentication', str(ctx.exception))
+
 if __name__ == '__main__':
     unittest.main()

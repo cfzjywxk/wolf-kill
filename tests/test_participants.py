@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from wolfkill.cli import build_participants, load_config
 from wolfkill.gateway import ParticipantGateway
-from wolfkill.participants import CodexCliParticipant, KimiCliParticipant, ParticipantInvocationError
+from wolfkill.participants import ClaudeCliParticipant, CodexCliParticipant, KimiCliParticipant, ParticipantInvocationError, verify_claude_cli_ready
 from wolfkill.presets import create_state_from_role_map, get_preset
 from wolfkill.visibility import VisibilityCompiler
 from wolfkill.models import EventVisibility, Phase, Role
@@ -41,6 +41,59 @@ class ParticipantAdapterTests(unittest.TestCase):
         self.assertIn("--output-schema", captured[0])
         self.assertIn("resume", captured[1])
         self.assertIn("thread-1", captured[1])
+
+    def test_claude_cli_participant_uses_required_model_and_effort(self) -> None:
+        participant = ClaudeCliParticipant(name="Claude P4", cwd="/tmp/wolfkill-claude")
+        captured: list[list[str]] = []
+
+        def fake_run(command, **kwargs):
+            import json
+            captured.append(command)
+            payload = json.dumps({"session_id": "claude-session-1", "result": json.dumps({"text": "ok"})})
+            return subprocess.CompletedProcess(command, 0, stdout=payload, stderr="")
+        with patch("wolfkill.participants.subprocess.run", side_effect=fake_run):
+            response = participant.speak(self.speech_request)
+
+        self.assertEqual(response["text"], "ok")
+        self.assertIn("--model", captured[0])
+        self.assertIn("claude-sonnet-4-6", captured[0])
+        self.assertIn("--effort", captured[0])
+        self.assertIn("medium", captured[0])
+        self.assertEqual(participant.session_id, "claude-session-1")
+
+    def test_claude_cli_participant_resumes_same_session(self) -> None:
+        participant = ClaudeCliParticipant(name="Claude Resume", cwd="/tmp/wolfkill-claude")
+        participant.session_id = "claude-session-1"
+        captured: list[list[str]] = []
+        def fake_run(command, **kwargs):
+            import json
+            captured.append(command)
+            payload = json.dumps({"session_id": "claude-session-1", "result": json.dumps({"action_type": "NO_OP", "target": None})})
+            return subprocess.CompletedProcess(command, 0, stdout=payload, stderr="")
+
+        with patch("wolfkill.participants.subprocess.run", side_effect=fake_run):
+            response = participant.decide(self.decision_request)
+
+        self.assertEqual(response["action_type"], "NO_OP")
+        self.assertIn("--resume", captured[0])
+        self.assertIn("claude-session-1", captured[0])
+
+    def test_verify_claude_cli_ready_requires_http_proxy_and_required_ip(self) -> None:
+        participant = ClaudeCliParticipant(
+            name="Claude Guard",
+            model="claude-sonnet-4-6",
+            env={"http_proxy": "http://127.0.0.1:7890"},
+        )
+        calls = 0
+
+        def fake_run(command, **kwargs):
+            nonlocal calls
+            calls += 1
+            return subprocess.CompletedProcess(command, 0, stdout='154.28.2.59\n', stderr='')
+
+        with patch('wolfkill.participants.shutil.which', return_value='/usr/bin/claude'), patch('wolfkill.participants.subprocess.run', side_effect=fake_run):
+            verify_claude_cli_ready(participant)
+        self.assertEqual(calls, 1)
 
     def test_kimi_cli_participant_reuses_same_session_id_across_calls(self) -> None:
         participant = KimiCliParticipant(name="Kimi P2", cwd="/tmp/wolfkill-kimi", timeout_seconds=9.0, model="moonshot-test", agent="default")
@@ -177,6 +230,25 @@ class ParticipantAdapterTests(unittest.TestCase):
         self.assertIn("new_visible_events", second_request["private_view"])
         self.assertEqual(len(second_request["private_view"]["new_visible_events"]), 1)
 
+    def test_kimi_preflight_passes_config_file_to_cli(self) -> None:
+        import tempfile
+        from wolfkill.participants import verify_kimi_cli_ready
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_file = Path(temp_dir) / 'kimi.toml'
+            config_file.write_text('default_model = "kimi-code/kimi-for-coding"\n', encoding='utf-8')
+            participant = KimiCliParticipant(name='Kimi Config', config_file=str(config_file))
+            captured = {}
+
+            def fake_run(command, **kwargs):
+                captured['command'] = command
+                return subprocess.CompletedProcess(command, 0, stdout='{"role":"assistant","content":[{"type":"text","text":"ok"}]}', stderr='')
+
+            with patch('wolfkill.participants.shutil.which', return_value='/usr/bin/kimi'), patch('wolfkill.participants.subprocess.run', side_effect=fake_run):
+                verify_kimi_cli_ready(participant)
+
+            self.assertIn('--config-file', captured['command'])
+            self.assertIn(str(config_file), captured['command'])
+
     def test_kimi_cli_reuses_same_session_id_across_speak_and_decide(self) -> None:
         participant = KimiCliParticipant(name="Kimi Mixed", cwd="/tmp/wolfkill-kimi", model="moonshot-test")
         captured: list[list[str]] = []
@@ -227,7 +299,7 @@ class ParticipantAdapterTests(unittest.TestCase):
         self.assertEqual(full_again_request["context_mode"], "full")
         self.assertIn("all_visible_events", full_again_request["private_view"])
 
-    def test_mixed_agents_example_assigns_three_codex_two_kimi_plus_human(self) -> None:
+    def test_mixed_agents_example_assigns_three_codex_two_claude_plus_human(self) -> None:
         config = load_config('examples/classic6-you-plus-5mixed-agents.json')
         participants = build_participants(
             preset=get_preset("classic-6"),
@@ -237,11 +309,11 @@ class ParticipantAdapterTests(unittest.TestCase):
             human_name='你',
         )
         codex_count = sum(isinstance(adapter, CodexCliParticipant) for adapter in participants.values())
-        kimi_count = sum(isinstance(adapter, KimiCliParticipant) for adapter in participants.values())
+        claude_count = sum(isinstance(adapter, ClaudeCliParticipant) for adapter in participants.values())
         human_count = sum(adapter.__class__.__name__ == 'HumanCliParticipant' for adapter in participants.values())
         mock_count = sum(adapter.__class__.__name__ == 'MockParticipant' for adapter in participants.values())
         self.assertEqual(codex_count, 3)
-        self.assertEqual(kimi_count, 2)
+        self.assertEqual(claude_count, 2)
         self.assertEqual(human_count, 1)
         self.assertEqual(mock_count, 0)
 

@@ -10,7 +10,6 @@
     "p2": {
       "type": "kimi_cli",
       "name": "Kimi Seat P2",
-      "share_dir": "/tmp/wolfkill-kimi-p2",
       "background": "Play cautiously, use only visible information, and return strict JSON.",
       "model": "kimi-code/kimi-for-coding"
     },

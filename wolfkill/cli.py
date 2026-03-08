@@ -24,10 +24,12 @@ from .localization import (
     label_team,
 )
 from .participants import (
+    ClaudeCliParticipant,
     CodexCliParticipant,
     HumanCliParticipant,
     KimiCliParticipant,
     MockParticipant,
+    verify_claude_cli_ready,
     verify_kimi_cli_ready,
     build_process_env,
     normalize_timeout_seconds,
@@ -103,6 +105,8 @@ def run_command(args, *, explicit_flags: set[str] | None = None) -> int:
                 for adapter in participants.values():
                     if isinstance(adapter, KimiCliParticipant):
                         verify_kimi_cli_ready(adapter)
+                    if isinstance(adapter, ClaudeCliParticipant):
+                        verify_claude_cli_ready(adapter)
                 current_human_seat = human_seat
             elif human_seat != current_human_seat:
                 _swap_human_seat(participants, current_human_seat, human_seat, args.human_name, config)
@@ -238,6 +242,18 @@ def _build_participant_from_config(participant_config: dict, seat: str, base_dir
             executable=participant_config.get("executable", "codex"),
             sandbox=participant_config.get("sandbox", "read-only"),
             config_overrides=list(participant_config.get("config_overrides", [])),
+            extra_args=list(participant_config.get("extra_args", [])),
+            env=participant_env,
+        )
+    if participant_type == "claude_cli":
+        return ClaudeCliParticipant(
+            name=name,
+            background=background,
+            cwd=participant_cwd,
+            timeout_seconds=normalize_timeout_seconds(participant_config.get("timeout_seconds")),
+            model=participant_config.get("model") or "claude-sonnet-4-6",
+            effort=participant_config.get("effort", "medium"),
+            executable=participant_config.get("executable", "claude"),
             extra_args=list(participant_config.get("extra_args", [])),
             env=participant_env,
         )
@@ -395,8 +411,14 @@ def _build_review_prompt(state) -> str:
 
 def _find_reviewer(participants: dict):
     for adapter in participants.values():
+        if isinstance(adapter, ClaudeCliParticipant):
+            args = [adapter.executable, '-p', '--output-format', 'json', '--model', adapter.model, '--effort', adapter.effort]
+            if adapter.session_id:
+                args.extend(['--resume', adapter.session_id])
+            return (adapter.executable, args, dict(adapter.env), adapter.cwd)
+    for adapter in participants.values():
         if isinstance(adapter, KimiCliParticipant):
-            args = [adapter.executable, "--session", adapter.session_id, "--print", "--input-format", "text", "--output-format", "text", "--final-message-only"]
+            args = [adapter.executable, "--session", adapter.session_id, "--print", "--input-format", "text", "--output-format", "stream-json"]
             if adapter.model:
                 args.extend(["--model", adapter.model])
             if adapter.agent:

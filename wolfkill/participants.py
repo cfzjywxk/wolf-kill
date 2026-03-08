@@ -398,9 +398,55 @@ class CodexCliParticipant(PromptJsonParticipant):
         return jsonl_output
 
 
+CLAUDE_REQUIRED_IP = "154.28.2.59"
+_CLAUDE_PREFLIGHT_CACHE: set[tuple[str, str | None, str | None, tuple[tuple[str, str], ...]]] = set()
+
+
+def _effective_http_proxy(env: dict[str, str]) -> str | None:
+    return env.get("http_proxy") or env.get("HTTP_PROXY")
+
+
+def _curl_ipinfo(env: dict[str, str], *, timeout_seconds: float = 15.0) -> str:
+    completed = subprocess.run(
+        ["curl", "-s", "--max-time", "10", "https://ipinfo.io/ip"],
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        env=build_process_env(env),
+        check=False,
+    )
+    return completed.stdout.strip()
+
+
+def verify_claude_cli_ready(adapter: "ClaudeCliParticipant") -> None:
+    if shutil.which(adapter.executable) is None:
+        raise RuntimeError(f"claude_cli 不可用：找不到可执行文件 {adapter.executable!r}")
+    effective_env = dict(adapter.env)
+    http_proxy = _effective_http_proxy(effective_env)
+    if not http_proxy:
+        raise RuntimeError("claude_cli 启动前检查失败：当前启动环境未启用 http_proxy。")
+    cache_key = (
+        adapter.executable,
+        adapter.model,
+        adapter.effort,
+        tuple(sorted((str(k), str(v)) for k, v in effective_env.items())),
+    )
+    if cache_key in _CLAUDE_PREFLIGHT_CACHE:
+        return
+    current_ip = _curl_ipinfo(effective_env)
+    if current_ip != CLAUDE_REQUIRED_IP:
+        raise RuntimeError(
+            f"claude_cli 启动前检查失败：当前出口 IP 为 {current_ip}，必须为 {CLAUDE_REQUIRED_IP}。"
+        )
+    _CLAUDE_PREFLIGHT_CACHE.add(cache_key)
+
+
 def _default_kimi_config_file() -> str | None:
     path = Path.home() / '.kimi' / 'config.toml'
     return str(path) if path.is_file() else None
+
+
+_KIMI_PREFLIGHT_CACHE: set[tuple[str, str | None, str | None, tuple[tuple[str, str], ...]]] = set()
 
 
 def _kimi_default_model(config_file: str | None = None) -> str | None:
@@ -428,6 +474,121 @@ def verify_kimi_cli_ready(adapter: "KimiCliParticipant") -> None:
             "kimi_cli 未配置 model。请在 examples 配置中显式设置 model，"
             "或在 ~/.kimi/config.toml 中设置 default_model。"
         )
+    cache_key = (
+        adapter.executable,
+        adapter.model,
+        adapter.config_file,
+        tuple(sorted((str(k), str(v)) for k, v in adapter.env.items())),
+    )
+    if cache_key in _KIMI_PREFLIGHT_CACHE:
+        return
+    command = [
+        adapter.executable,
+        "--session", f"wolfkill-preflight-{uuid4().hex}",
+        "--print",
+        "--input-format", "text",
+        "--output-format", "stream-json",
+        "--model", adapter.model,
+    ]
+    if adapter.config_file:
+        command.extend(["--config-file", adapter.config_file])
+    if adapter.agent:
+        command.extend(["--agent", adapter.agent])
+    try:
+        completed = subprocess.run(
+            command,
+            input='请只返回 {"ok":true}',
+            capture_output=True,
+            text=True,
+            timeout=20,
+            cwd=adapter.cwd,
+            env=build_process_env(adapter.env),
+            check=False,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"kimi_cli 预检失败：{exc}") from exc
+    detail = (completed.stderr or completed.stdout).strip()
+    lowered = detail.lower()
+    if '401' in lowered or 'invalid authentication' in lowered or 'invalid_authentication_error' in lowered:
+        raise RuntimeError('kimi_cli 鉴权失败（401 Invalid Authentication）。请先执行 `kimi login`，或检查 ~/.kimi 下的凭证是否有效。')
+    if completed.returncode != 0 and not completed.stdout.strip():
+        raise RuntimeError(f"kimi_cli 预检失败：{detail[:280]}")
+    _KIMI_PREFLIGHT_CACHE.add(cache_key)
+
+
+class ClaudeCliParticipant(PromptJsonParticipant):
+    provider_label = "claude_cli"
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        background: str | None = None,
+        cwd: str | None = None,
+        timeout_seconds: float | None = None,
+        model: str | None = None,
+        effort: str = "medium",
+        executable: str = "claude",
+        extra_args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(name=name, background=background, cwd=cwd, timeout_seconds=timeout_seconds, extra_args=extra_args, env=env)
+        self.model = model or "claude-sonnet-4-6"
+        self.effort = effort or "medium"
+        self.executable = executable
+        self.session_id: str | None = None
+
+    @property
+    def has_session(self) -> bool:
+        return self.session_id is not None
+
+    def reset_state(self) -> None:
+        super().reset_state()
+        self.session_id = None
+
+    def _run_prompt(self, mode: str, prompt: str) -> str:
+        command = [self.executable, "-p", "--output-format", "json", "--model", self.model, "--effort", self.effort]
+        if self.session_id:
+            command.extend(["--resume", self.session_id])
+        command.extend(self.extra_args)
+        io_wait_started_at = time.monotonic()
+        completed = subprocess.run(
+            command,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            cwd=self.cwd,
+            timeout=self.timeout_seconds,
+            env=build_process_env(self.env),
+            check=False,
+        )
+        io_wait_seconds = time.monotonic() - io_wait_started_at
+        self._set_run_prompt_meta(io_wait_seconds=io_wait_seconds)
+        if completed.returncode != 0 and not completed.stdout.strip():
+            self._raise_process_error(completed)
+        if not completed.stdout.strip() and completed.stderr.strip():
+            self._raise_process_error(completed)
+        return self._unwrap_json_envelope(completed.stdout)
+
+    def _unwrap_json_envelope(self, raw: str) -> str:
+        stripped = raw.strip()
+        if not stripped:
+            return raw
+        try:
+            envelope = json.loads(stripped)
+        except json.JSONDecodeError:
+            return raw
+        if not isinstance(envelope, dict):
+            return raw
+        session_id = envelope.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            self.session_id = session_id
+        result = envelope.get("result")
+        if isinstance(result, str):
+            return result
+        if result is not None:
+            return json.dumps(result, ensure_ascii=False)
+        return raw
 
 
 class KimiCliParticipant(PromptJsonParticipant):
