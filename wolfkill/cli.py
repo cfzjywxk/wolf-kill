@@ -7,6 +7,7 @@ import random
 import subprocess
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 from .colors import bold, cyan, dim, green, magenta, red, seat_color, yellow
 from .engine import GameEngine, build_previous_game_summary
@@ -72,7 +73,7 @@ def run_command(args, *, explicit_flags: set[str] | None = None) -> int:
     )
     preset = get_preset(preset_name)
     project_dir = Path(config.get("_base_dir", ".")).resolve()
-    learn_dir = project_dir / "learn"
+    learn_dir = resolve_learn_dir(project_dir)
     learn_dir.mkdir(exist_ok=True)
     learn_history = load_learn_history(learn_dir)
     participants: dict | None = None
@@ -139,6 +140,7 @@ def run_command(args, *, explicit_flags: set[str] | None = None) -> int:
                 max_days=max_days,
                 previous_games=previous_games,
                 learn_history=learn_history,
+                learn_briefing_label=_LEARN_FILE_WHITELIST[0] if learn_history else None,
             ).run()
             print_public_summary(final_state)
             print_gateway_issues(gateway.issues)
@@ -275,6 +277,36 @@ def _build_participant_from_config(participant_config: dict, seat: str, base_dir
 
 _LEARN_FILE_MAX_CHARS = 4000
 _LEARN_TOTAL_MAX_CHARS = 8000
+_LEARN_FILE_WHITELIST = ("strategy_guide.md",)
+
+
+def resolve_learn_dir(base_dir: Path) -> Path:
+    base_dir = base_dir.resolve()
+    package_root = Path(__file__).resolve().parent.parent
+    search_roots: list[Path] = []
+    for candidate in (base_dir, Path.cwd().resolve(), package_root):
+        if candidate not in search_roots:
+            search_roots.append(candidate)
+
+    def _iter_candidates() -> list[Path]:
+        candidates: list[Path] = []
+        for root in search_roots:
+            for current in (root, *root.parents):
+                learn_dir = current / "learn"
+                if learn_dir not in candidates:
+                    candidates.append(learn_dir)
+        return candidates
+
+    candidates = _iter_candidates()
+    for learn_dir in candidates:
+        if not learn_dir.is_dir():
+            continue
+        if any((learn_dir / filename).is_file() for filename in _LEARN_FILE_WHITELIST):
+            return learn_dir
+    for learn_dir in candidates:
+        if learn_dir.is_dir():
+            return learn_dir
+    return package_root / "learn"
 
 
 def load_learn_history(learn_dir: Path) -> list[str]:
@@ -283,8 +315,8 @@ def load_learn_history(learn_dir: Path) -> list[str]:
     entries = []
     total = 0
     md_files = sorted(
-        learn_dir.glob("*.md"),
-        key=lambda path: (path.name.endswith("-game.md"), path.name),
+        [learn_dir / filename for filename in _LEARN_FILE_WHITELIST if (learn_dir / filename).is_file()],
+        key=lambda path: path.name,
     )
     for md_file in md_files:
         try:
@@ -321,6 +353,9 @@ def save_game_record(state, review_text: str | None, learn_dir: Path, *, gateway
     if timing_summary is not None:
         lines.extend(["", "## 等待耗时统计", ""])
         lines.extend(build_gateway_timing_report_lines(timing_summary))
+    if gateway is not None and gateway.issues:
+        lines.extend(["", "## 运行问题详情", ""])
+        lines.extend(build_gateway_issue_report_lines(gateway.issues))
     lines.extend(["", "## 完整事件记录", ""])
     for event in state.transcript:
         lines.append(format_event_line(index=event.index, day=event.day, phase=event.phase, channel=event.channel, text=event.text, speaker=event.speaker))
@@ -412,27 +447,39 @@ def _build_review_prompt(state) -> str:
 def _find_reviewer(participants: dict):
     for adapter in participants.values():
         if isinstance(adapter, ClaudeCliParticipant):
-            args = [adapter.executable, '-p', '--output-format', 'json', '--model', adapter.model, '--effort', adapter.effort]
-            if adapter.session_id:
-                args.extend(['--resume', adapter.session_id])
-            return (adapter.executable, args, dict(adapter.env), adapter.cwd)
+            args = [
+                adapter.executable,
+                '-p',
+                '--output-format', 'json',
+                '--model', adapter.model,
+                '--effort', adapter.effort,
+                '--session-id', str(uuid4()),
+                '--no-session-persistence',
+            ]
+            return ('claude_json', args, dict(adapter.env), adapter.cwd)
     for adapter in participants.values():
         if isinstance(adapter, KimiCliParticipant):
-            args = [adapter.executable, "--session", adapter.session_id, "--print", "--input-format", "text", "--output-format", "stream-json"]
+            args = [
+                adapter.executable,
+                '--session', f'review-{uuid4().hex}',
+                '--print',
+                '--input-format', 'text',
+                '--output-format', 'stream-json',
+            ]
             if adapter.model:
-                args.extend(["--model", adapter.model])
+                args.extend(['--model', adapter.model])
             if adapter.agent:
-                args.extend(["--agent", adapter.agent])
+                args.extend(['--agent', adapter.agent])
             if adapter.config_file:
-                args.extend(["--config-file", adapter.config_file])
-            return (adapter.executable, args, dict(adapter.env), adapter.cwd)
+                args.extend(['--config-file', adapter.config_file])
+            return ('kimi_stream_json', args, dict(adapter.env), adapter.cwd)
     for adapter in participants.values():
         if isinstance(adapter, CodexCliParticipant):
-            args = [adapter.executable, "exec", "--skip-git-repo-check", "--ephemeral", "--color", "never", "--sandbox", adapter.sandbox]
+            args = [adapter.executable, 'exec', '--skip-git-repo-check', '--ephemeral', '--color', 'never', '--sandbox', adapter.sandbox]
             if adapter.model:
-                args.extend(["-m", adapter.model])
-            args.append("-")
-            return (adapter.executable, args, dict(adapter.env), adapter.cwd)
+                args.extend(['-m', adapter.model])
+            args.append('-')
+            return ('codex_text', args, dict(adapter.env), adapter.cwd)
     return None
 
 
@@ -440,7 +487,7 @@ def post_game_review(state, participants: dict) -> str | None:
     reviewer = _find_reviewer(participants)
     if reviewer is None:
         return None
-    executable, command, env, cwd = reviewer
+    reviewer_kind, command, env, cwd = reviewer
     prompt = _build_review_prompt(state)
     print("\n" + "=" * 50)
     print(bold(cyan("=== AI 复盘与评分 ===")))
@@ -448,10 +495,35 @@ def post_game_review(state, participants: dict) -> str | None:
     print(dim("正在生成复盘分析，请稍候..."))
     try:
         proc_env = build_process_env(env)
-        completed = subprocess.run(command, input=prompt, capture_output=True, text=True, cwd=cwd, timeout=120, env=proc_env, check=False)
-        output = completed.stdout.strip()
+        completed = subprocess.run(
+            command,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=120,
+            env=proc_env,
+            check=False,
+        )
+        stdout = completed.stdout.strip()
+        stderr = completed.stderr.strip()
+        if reviewer_kind == 'claude_json' and stdout:
+            try:
+                envelope = json.loads(stdout)
+                if isinstance(envelope, dict) and envelope.get('result') is not None:
+                    output = str(envelope['result']).strip()
+                else:
+                    output = stdout
+            except json.JSONDecodeError:
+                output = stdout
+        elif reviewer_kind == 'kimi_stream_json' and stdout:
+            from .participants import KimiCliParticipant
+            output = KimiCliParticipant(name='review-tmp')._unwrap_stream_json(stdout).strip()
+        else:
+            output = stdout
         if not output:
-            print(red("复盘生成失败：AI 无返回内容。"))
+            detail = stderr or stdout or 'AI 无返回内容'
+            print(red(f"复盘生成失败：{detail}"))
             return None
         print()
         print(output)
@@ -462,6 +534,20 @@ def post_game_review(state, participants: dict) -> str | None:
     except Exception as exc:
         print(red(f"复盘生成失败：{exc}"))
         return None
+
+
+def build_gateway_issue_report_lines(issues: list[dict[str, str]]) -> list[str]:
+    lines: list[str] = []
+    for issue in issues:
+        lines.append(
+            f"- [{label_seat(issue['seat'])}:{label_issue_mode(issue['mode'])}:{label_issue_kind(issue['kind'])}] "
+            f"{issue['participant']}: {issue['message']}"
+        )
+        if issue.get('stderr'):
+            lines.append(f"  stderr: {issue['stderr']}")
+        if issue.get('stdout'):
+            lines.append(f"  stdout: {issue['stdout']}")
+    return lines
 
 
 def print_gateway_issues(issues: list[dict[str, str]]) -> None:

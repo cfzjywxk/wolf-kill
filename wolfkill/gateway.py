@@ -27,6 +27,8 @@ class ParticipantGateway:
         self.learn_history = list(learn_history or [])
         self.previous_games = list(previous_games or [])
         self._current_wait_key: tuple[str, str] | None = None
+        self._hidden_night_announced_day: int | None = None
+        self._hidden_night_clock_day: int | None = None
 
     def request_speech(self, state, seat: str, audience: Audience, prompt: str) -> str:
         started_at = time.monotonic()
@@ -40,8 +42,9 @@ class ParticipantGateway:
         self._announce_wait(state, seat, "speech", request)
         wait_announce_seconds = time.monotonic() - wait_started_at
         show_clock = not isinstance(adapter, HumanCliParticipant)
+        hidden_wait = self._should_hide_request_details(state, seat, request)
         if show_clock:
-            self._start_clock()
+            self._start_wait_clock(hidden_wait=hidden_wait, day=int(state.day))
         adapter.clear_last_call_diagnostics()
         adapter_started_at = time.monotonic()
         try:
@@ -53,12 +56,12 @@ class ParticipantGateway:
                 text = "我先不发言。"
         except Exception as exc:
             self._record_exception(seat, "speech", exc)
-            self._announce_issue(state, seat, "speech", "发言失败，已使用默认发言。")
+            self._announce_issue(state, seat, "speech", f"发言失败，已使用默认发言：{self._exception_brief(exc)}")
             text = "我先不发言。"
         finally:
             adapter_seconds = time.monotonic() - adapter_started_at
             if show_clock:
-                self._stop_clock()
+                self._stop_wait_clock(hidden_wait=hidden_wait)
         if show_clock:
             record = self._record_wait_timing(state=state, seat=seat, mode="speech", request=request, adapter=adapter, total_seconds=time.monotonic() - started_at, adapter_seconds=adapter_seconds, request_build_seconds=request_build_seconds, wait_announce_seconds=wait_announce_seconds, done_announce_seconds=0.0, pause_seconds=self.total_pause_seconds - pause_before)
             done_started_at = time.monotonic()
@@ -78,8 +81,9 @@ class ParticipantGateway:
         self._announce_wait(state, seat, "decision", request)
         wait_announce_seconds = time.monotonic() - wait_started_at
         show_clock = not isinstance(adapter, HumanCliParticipant)
+        hidden_wait = self._should_hide_request_details(state, seat, request)
         if show_clock:
-            self._start_clock()
+            self._start_wait_clock(hidden_wait=hidden_wait, day=int(state.day))
         adapter.clear_last_call_diagnostics()
         adapter_started_at = time.monotonic()
         try:
@@ -90,12 +94,12 @@ class ParticipantGateway:
                 self._announce_issue(state, seat, "decision", f"行动无效，已回退到默认动作：{issue}")
         except Exception as exc:
             self._record_exception(seat, "decision", exc)
-            self._announce_issue(state, seat, "decision", "行动失败，已回退到默认动作。")
+            self._announce_issue(state, seat, "decision", f"行动失败，已回退到默认动作：{self._exception_brief(exc)}")
             decision = self._fallback_decision(specs)
         finally:
             adapter_seconds = time.monotonic() - adapter_started_at
             if show_clock:
-                self._stop_clock()
+                self._stop_wait_clock(hidden_wait=hidden_wait)
         details = self._describe_decision(decision, specs)
         if show_clock:
             record = self._record_wait_timing(state=state, seat=seat, mode="decision", request=request, adapter=adapter, total_seconds=time.monotonic() - started_at, adapter_seconds=adapter_seconds, request_build_seconds=request_build_seconds, wait_announce_seconds=wait_announce_seconds, done_announce_seconds=0.0, pause_seconds=self.total_pause_seconds - pause_before, details=details)
@@ -255,10 +259,52 @@ class ParticipantGateway:
     def _record_exception(self, seat: str, mode: str, exc: Exception) -> None:
         message = str(exc).strip() or exc.__class__.__name__
         kind = getattr(exc, "kind", None) or self._issue_kind(message)
-        self._record_issue(seat, mode, message, kind=kind)
+        self._record_issue(
+            seat,
+            mode,
+            message,
+            kind=kind,
+            stdout=getattr(exc, "stdout", None),
+            stderr=getattr(exc, "stderr", None),
+        )
 
-    def _record_issue(self, seat: str, mode: str, message: str, *, kind: str) -> None:
-        self.issues.append({"seat": seat, "participant": self.participants[seat].name, "mode": mode, "kind": kind, "message": message[:280]})
+    def _record_issue(
+        self,
+        seat: str,
+        mode: str,
+        message: str,
+        *,
+        kind: str,
+        stdout: str | None = None,
+        stderr: str | None = None,
+    ) -> None:
+        self.issues.append(
+            {
+                "seat": seat,
+                "participant": self.participants[seat].name,
+                "mode": mode,
+                "kind": kind,
+                "message": message[:280],
+                "stdout": self._debug_excerpt(stdout),
+                "stderr": self._debug_excerpt(stderr),
+            }
+        )
+
+    def _debug_excerpt(self, text: str | None, *, limit: int = 600) -> str | None:
+        if not text:
+            return None
+        stripped = text.strip()
+        if not stripped:
+            return None
+        if len(stripped) > limit:
+            return stripped[:limit] + "\n…（已截断）"
+        return stripped
+
+    def _exception_brief(self, exc: Exception, *, limit: int = 160) -> str:
+        message = str(exc).strip() or exc.__class__.__name__
+        if len(message) > limit:
+            return message[:limit] + "…"
+        return message
 
     def _adapter_diagnostics(self, adapter: ParticipantAdapter, *, fallback_seconds: float, request: dict[str, Any]) -> dict[str, Any]:
         info = dict(adapter.last_call_diagnostics or {})
@@ -423,13 +469,18 @@ class ParticipantGateway:
 
     def _announce_wait(self, state, seat: str, mode: str, request: dict[str, Any]) -> None:
         hidden = self._should_hide_request_details(state, seat, request)
-        wait_key = ("hidden_night", int(state.day)) if hidden else (seat, mode)
+        if hidden:
+            if self._hidden_night_announced_day == int(state.day):
+                return
+            self._hidden_night_announced_day = int(state.day)
+            self._current_wait_key = ("hidden_night", str(state.day))
+            self._emit(dim(self._hidden_wait_message(seat, mode)), pace=False)
+            return
+        self._stop_hidden_night_clock()
+        wait_key = (seat, mode)
         if self._current_wait_key == wait_key:
             return
         self._current_wait_key = wait_key
-        if hidden:
-            self._emit(dim(self._hidden_wait_message(seat, mode)), pace=False)
-            return
         self._emit(dim(self._judge_wait_message(seat, mode, request)), pace=self._should_pause_for_request(state, seat))
 
     def _announce_request_feed_summary(self, state, seat: str, mode: str, request: dict[str, Any]) -> None:
@@ -503,6 +554,7 @@ class ParticipantGateway:
             observer.remember_event(event_id)
 
     def _announce_live_event(self, event, *, judge_mode: bool) -> None:
+        self._stop_hidden_night_clock()
         raw = format_event_line(index=event.index, day=event.day, phase=event.phase, channel=event.channel, text=event.text, speaker=event.speaker)
         if judge_mode:
             if event.channel in {"speech", "wolf"} and event.speaker:
@@ -573,6 +625,27 @@ class ParticipantGateway:
     def _hidden_done_message(self, mode: str) -> str:
         label = "夜间发言" if mode == "speech" else "夜间行动"
         return f"已记录一位玩家的{label}。"
+
+    def _start_wait_clock(self, *, hidden_wait: bool, day: int) -> None:
+        if hidden_wait:
+            if self._hidden_night_clock_day == day:
+                return
+            self._hidden_night_clock_day = day
+            self._start_clock()
+            return
+        self._stop_hidden_night_clock()
+        self._start_clock()
+
+    def _stop_wait_clock(self, *, hidden_wait: bool) -> None:
+        if hidden_wait:
+            return
+        self._stop_clock()
+
+    def _stop_hidden_night_clock(self) -> None:
+        if self._hidden_night_clock_day is None:
+            return
+        self._hidden_night_clock_day = None
+        self._stop_clock()
 
     def _start_clock(self) -> None:
         is_tty = getattr(sys.stdout, "isatty", None)

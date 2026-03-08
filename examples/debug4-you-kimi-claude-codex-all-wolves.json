@@ -1,0 +1,32 @@
+{
+  "preset": "all-wolf-4",
+  "max_days": 1,
+  "narration_delay_seconds": 1,
+  "participants": {
+    "p2": {
+      "type": "kimi_cli",
+      "name": "Kimi Debug",
+      "background": "You are in a 4-player all-wolf smoke test. Stay in character and return strict JSON.",
+      "model": "kimi-code/kimi-for-coding"
+    },
+    "p3": {
+      "type": "claude_cli",
+      "name": "Claude Debug",
+      "background": "You are in a 4-player all-wolf smoke test. Stay in character and return strict JSON.",
+      "model": "claude-sonnet-4-6",
+      "effort": "medium",
+      "env": {
+        "http_proxy": "http://127.0.0.1:7890",
+        "https_proxy": "http://127.0.0.1:7890",
+        "HTTP_PROXY": "http://127.0.0.1:7890",
+        "HTTPS_PROXY": "http://127.0.0.1:7890"
+      }
+    },
+    "p4": {
+      "type": "codex_cli",
+      "name": "Codex Debug",
+      "background": "You are in a 4-player all-wolf smoke test. Stay in character and return strict JSON.",
+      "sandbox": "read-only"
+    }
+  }
+}

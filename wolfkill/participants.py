@@ -438,6 +438,36 @@ def verify_claude_cli_ready(adapter: "ClaudeCliParticipant") -> None:
         raise RuntimeError(
             f"claude_cli 启动前检查失败：当前出口 IP 为 {current_ip}，必须为 {CLAUDE_REQUIRED_IP}。"
         )
+    command = [
+        adapter.executable,
+        '-p',
+        '--output-format', 'json',
+        '--input-format', 'text',
+        '--model', adapter.model,
+        '--effort', adapter.effort,
+        '--session-id', str(uuid4()),
+        '--no-session-persistence',
+        '--json-schema', json.dumps(response_schema('speech'), ensure_ascii=False),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            input='请只返回 {"text":"ok"}',
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=adapter.cwd,
+            env=build_process_env(effective_env),
+            check=False,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"claude_cli 预检失败：{exc}") from exc
+    detail = (completed.stderr or completed.stdout).strip()
+    lowered = detail.lower()
+    if '401' in lowered or 'invalid authentication' in lowered or 'unauthorized' in lowered:
+        raise RuntimeError('claude_cli 鉴权失败。请确认当前代理/IP 正确且 Claude 账号凭证有效。')
+    if completed.returncode != 0 and not completed.stdout.strip():
+        raise RuntimeError(f"claude_cli 预检失败：{detail[:280]}")
     _CLAUDE_PREFLIGHT_CACHE.add(cache_key)
 
 
@@ -547,7 +577,15 @@ class ClaudeCliParticipant(PromptJsonParticipant):
         self.session_id = None
 
     def _run_prompt(self, mode: str, prompt: str) -> str:
-        command = [self.executable, "-p", "--output-format", "json", "--model", self.model, "--effort", self.effort]
+        command = [
+            self.executable,
+            "-p",
+            "--output-format", "json",
+            "--input-format", "text",
+            "--model", self.model,
+            "--effort", self.effort,
+            "--json-schema", json.dumps(response_schema(mode), ensure_ascii=False),
+        ]
         if self.session_id:
             command.extend(["--resume", self.session_id])
         command.extend(self.extra_args)
@@ -585,9 +623,17 @@ class ClaudeCliParticipant(PromptJsonParticipant):
             self.session_id = session_id
         result = envelope.get("result")
         if isinstance(result, str):
-            return result
-        if result is not None:
+            if result.strip():
+                return result
+        elif result is not None:
             return json.dumps(result, ensure_ascii=False)
+        structured_output = envelope.get("structured_output")
+        if isinstance(structured_output, dict):
+            text_field = structured_output.get("text")
+            if isinstance(text_field, str) and text_field.strip():
+                return text_field
+            if structured_output:
+                return json.dumps(structured_output, ensure_ascii=False)
         return raw
 
 
@@ -701,7 +747,7 @@ def build_agent_prompt(provider_label: str, mode: str, request: dict[str, Any]) 
         f"返回格式示例：{response_format}",
         "如果是 decision 模式，action_type 必须从 request.options 中原样选择。",
         "如果是 speech 模式，text 是你的中文发言，不超过 600 个字符。",
-        *( ["如果 request.strategy_briefing 存在，请把其中的复盘经验和策略总结当作赛前学习材料。"] if localized_request.get("strategy_briefing") else [] ),
+        *( ["如果 request.strategy_briefing 存在，你必须先吸收其中的赛前策略知识，再结合当前可见事实推理；策略知识不能替代当前局面，也不能让你假设隐藏信息。"] if localized_request.get("strategy_briefing") else [] ),
         *([truncation_notice] if truncation_notice else []),
         "",
         *gameplay_lines,
@@ -745,6 +791,7 @@ def _gameplay_instructions(mode: str, request: dict[str, Any]) -> list[str]:
                 "3. 白天谁来悍跳/对跳？谁深水？谁冲锋站边？如何配合？",
                 "4. 可以使用的狼人技术：悍跳、垫飞、狼踩狼、倒钩、深水、冲锋。",
                 "5. 禁止空话，必须给出明确的刀口建议和理由。",
+                "6. 如果你已经没有新的补充，请直接回复：无更多讨论。法官会在全员都这么回复后进入行动确认。",
             ])
         elif phase == "DAY_SPEECH":
             lines.append("=== 白天发言指导 ===")

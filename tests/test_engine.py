@@ -13,6 +13,16 @@ from wolfkill.visibility import VisibilityCompiler
 
 
 class EngineTests(unittest.TestCase):
+    def test_all_wolf4_preset_is_four_wolves(self) -> None:
+        preset = get_preset("all-wolf-4")
+        self.assertEqual(preset.seat_order, ("p1", "p2", "p3", "p4"))
+        self.assertEqual([role.value for role in preset.roles], [Role.WOLF.value, Role.WOLF.value, Role.WOLF.value, Role.WOLF.value])
+
+    def test_duel2_preset_is_two_wolves(self) -> None:
+        preset = get_preset("duel-2")
+        self.assertEqual(preset.seat_order, ("p1", "p2"))
+        self.assertEqual([role.value for role in preset.roles], [Role.WOLF.value, Role.WOLF.value])
+
     def test_classic6_preset_matches_mvp_roles(self) -> None:
         preset = get_preset("classic-6")
         self.assertEqual(preset.seat_order, ("p1", "p2", "p3", "p4", "p5", "p6"))
@@ -24,6 +34,17 @@ class EngineTests(unittest.TestCase):
         state.players["p4"].alive = False
         state.players["p5"].alive = False
         self.assertIsNone(evaluate_winner(state))
+
+    def test_intro_win_condition_text_does_not_mention_parity(self) -> None:
+        state = create_state_from_role_map("classic-6", 7, {"p1": Role.WOLF, "p2": Role.WOLF, "p3": Role.SEER, "p4": Role.WITCH, "p5": Role.VILLAGER, "p6": Role.VILLAGER})
+        gateway = ParticipantGateway({"p1": HumanCliParticipant("你")}, VisibilityCompiler())
+        engine = GameEngine(state, gateway, max_days=0)
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            engine.run()
+        output = stream.getvalue()
+        self.assertIn("狼人阵营有两种获胜方式", output)
+        self.assertNotIn("存活狼人数≥存活好人数", output)
 
     def test_day_vote_tie_eliminates_nobody(self) -> None:
         result = resolve_vote({"p1": "p3", "p2": "p4", "p3": "p4", "p4": "p3"}, ("p1", "p2", "p3", "p4"))
@@ -86,6 +107,62 @@ class EngineTests(unittest.TestCase):
         self.assertIn(ActionType.WITCH_SAVE, action_types)
         self.assertIn(ActionType.WITCH_POISON, action_types)
         self.assertIn(ActionType.NO_OP, action_types)
+
+    def test_wolf_chat_stops_early_when_everyone_says_no_more_discussion(self) -> None:
+        class SilentWolf(MockParticipant):
+            def speak(self, request):
+                return {"text": "无更多讨论"}
+
+        state = create_state_from_role_map("classic-6", 7, {"p1": Role.WOLF, "p2": Role.WOLF, "p3": Role.SEER, "p4": Role.WITCH, "p5": Role.VILLAGER, "p6": Role.VILLAGER})
+        participants = {
+            "p1": SilentWolf("Wolf p1", seed=7),
+            "p2": SilentWolf("Wolf p2", seed=8),
+            "p3": MockParticipant("Mock p3", seed=9),
+            "p4": MockParticipant("Mock p4", seed=10),
+            "p5": MockParticipant("Mock p5", seed=11),
+            "p6": MockParticipant("Mock p6", seed=12),
+        }
+        gateway = ParticipantGateway(participants, VisibilityCompiler())
+        engine = GameEngine(state, gateway)
+
+        with redirect_stdout(io.StringIO()):
+            engine._run_night()
+
+        wolf_chat_events = [event for event in state.transcript if event.phase == Phase.WOLF_CHAT and event.channel == 'wolf']
+        self.assertEqual(len(wolf_chat_events), 2)
+        self.assertTrue(all(event.text == '无更多讨论' for event in wolf_chat_events))
+
+    def test_wolf_chat_caps_at_five_rounds_when_discussion_continues(self) -> None:
+        class TalkativeWolf(MockParticipant):
+            def __init__(self, name: str, seed: int = 0):
+                super().__init__(name, seed=seed)
+                self.calls = 0
+
+            def speak(self, request):
+                self.calls += 1
+                return {"text": f"继续讨论{self.calls}"}
+
+        state = create_state_from_role_map("classic-6", 7, {"p1": Role.WOLF, "p2": Role.WOLF, "p3": Role.SEER, "p4": Role.WITCH, "p5": Role.VILLAGER, "p6": Role.VILLAGER})
+        wolf1 = TalkativeWolf("Wolf p1", seed=7)
+        wolf2 = TalkativeWolf("Wolf p2", seed=8)
+        participants = {
+            "p1": wolf1,
+            "p2": wolf2,
+            "p3": MockParticipant("Mock p3", seed=9),
+            "p4": MockParticipant("Mock p4", seed=10),
+            "p5": MockParticipant("Mock p5", seed=11),
+            "p6": MockParticipant("Mock p6", seed=12),
+        }
+        gateway = ParticipantGateway(participants, VisibilityCompiler())
+        engine = GameEngine(state, gateway)
+
+        with redirect_stdout(io.StringIO()):
+            engine._run_night()
+
+        wolf_chat_events = [event for event in state.transcript if event.phase == Phase.WOLF_CHAT and event.channel == 'wolf']
+        self.assertEqual(len(wolf_chat_events), 10)
+        self.assertEqual(wolf1.calls, 5)
+        self.assertEqual(wolf2.calls, 5)
 
     def test_engine_records_witch_action_in_transcript(self) -> None:
         state = create_state_from_role_map("classic-6", 7, {"p1": Role.WITCH, "p2": Role.WOLF, "p3": Role.WOLF, "p4": Role.SEER, "p5": Role.VILLAGER, "p6": Role.VILLAGER})
@@ -202,6 +279,32 @@ class EngineTests(unittest.TestCase):
         self.assertIn('night_hint', witch_requests[0]['request']['private_view'])
         self.assertEqual(witch_requests[0]['request']['private_view']['night_hint']['wolf_target'], state.current_night.wolf_target)
         self.assertIn('strategy_briefing', witch_requests[0]['request'])
+
+    def test_announce_game_intro_mentions_strategy_guide_label(self) -> None:
+        state = create_state_from_role_map(
+            "classic-6",
+            7,
+            {
+                "p1": Role.VILLAGER,
+                "p2": Role.WOLF,
+                "p3": Role.WOLF,
+                "p4": Role.SEER,
+                "p5": Role.WITCH,
+                "p6": Role.VILLAGER,
+            },
+        )
+        participants = {seat: MockParticipant(name=f"Mock {seat}", seed=7 + index) for index, seat in enumerate(state.seat_order, start=1)}
+        gateway = ParticipantGateway(participants, VisibilityCompiler(), learn_history=["策略指南正文"])
+        engine = GameEngine(state, gateway, max_days=0, learn_history=["策略指南正文"], learn_briefing_label="strategy_guide.md")
+
+        with redirect_stdout(io.StringIO()):
+            engine._announce_game_intro()
+
+        public_system_events = [
+            event.text for event in state.transcript
+            if event.visibility == EventVisibility.PUBLIC and event.channel == 'system'
+        ]
+        self.assertIn('【系统】已为 AI 玩家加载赛前策略知识库 strategy_guide.md。', public_system_events)
 
     def _run_mock_game(self, seed: int):
         preset = get_preset("classic-6")

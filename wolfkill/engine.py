@@ -55,12 +55,13 @@ def build_previous_game_summary(state: GameState) -> str:
 
 
 class GameEngine:
-    def __init__(self, state: GameState, gateway: ParticipantGateway, max_days: int = 12, previous_games: list[str] | None = None, learn_history: list[str] | None = None) -> None:
+    def __init__(self, state: GameState, gateway: ParticipantGateway, max_days: int = 12, previous_games: list[str] | None = None, learn_history: list[str] | None = None, learn_briefing_label: str | None = None) -> None:
         self.state = state
         self.gateway = gateway
         self.max_days = max_days
         self.previous_games = previous_games or []
         self.learn_history = learn_history or []
+        self.learn_briefing_label = learn_briefing_label
 
     def run(self) -> GameState:
         self._announce_game_intro()
@@ -82,14 +83,17 @@ class GameEngine:
         for seat in self.state.seat_order:
             self._add_event(visibility=EventVisibility.PRIVATE, channel="system", text=self._private_role_intro(seat), recipients=(seat,))
         if self.learn_history:
-            self._public(f"【系统】已为 AI 玩家加载 {len(self.learn_history)} 份历史复盘作为赛前学习材料。")
+            if self.learn_briefing_label:
+                self._public(f"【系统】已为 AI 玩家加载赛前策略知识库 {self.learn_briefing_label}。")
+            else:
+                self._public(f"【系统】已为 AI 玩家加载 {len(self.learn_history)} 份赛前策略材料。")
         if self.previous_games:
             self._public(f"【系统】已为 AI 玩家加载 {len(self.previous_games)} 局本轮回顾作为策略参考。")
         self._public(f"游戏开始，使用预设：{label_preset(self.state.preset_name)}。")
         role_counts = Counter(player.role for player in self.state.players.values())
         self._public(f"本局共{len(self.state.seat_order)}名玩家，身份配置：{self._role_distribution_text(role_counts)}。")
         self._public(f"技能说明：{self._role_rules_text(role_counts)}。")
-        self._public("【胜利条件】好人阵营：放逐场上全部狼人，好人获胜。狼人阵营有三种获胜方式：①屠边——场上所有平民全部出局；②屠城——场上所有神职全部出局；③存活狼人数≥存活好人数。")
+        self._public("【胜利条件】好人阵营：放逐场上全部狼人，好人获胜。狼人阵营有两种获胜方式：①屠边——场上所有平民全部出局；②屠城——场上所有神职全部出局。")
 
     def _role_distribution_text(self, role_counts: Counter) -> str:
         ordered = [Role.WOLF, Role.SEER, Role.WITCH, Role.VILLAGER]
@@ -130,17 +134,17 @@ class GameEngine:
         if wolves:
             self.state.phase = Phase.WOLF_CHAT
             recipients = tuple(wolves)
-            chat_rounds = 2 if len(wolves) > 1 else 1
-            round_prompts = [
-                "【第1轮讨论】请分析当前局势，提出今晚的击杀目标建议，并说明理由。",
-                "【第2轮讨论】请回应队友的建议，确认或调整击杀目标，最终达成共识。",
-            ]
-            solo_prompt = "你是当前唯一存活的狼人，请分析局势并决定今晚的击杀目标。"
-            for round_idx in range(chat_rounds):
-                prompt = solo_prompt if len(wolves) == 1 else round_prompts[min(round_idx, len(round_prompts) - 1)]
+            max_chat_rounds = 1 if len(wolves) == 1 else 5
+            for round_idx in range(max_chat_rounds):
+                prompt = self._wolf_chat_prompt(round_idx=round_idx, wolf_count=len(wolves))
+                round_all_done = True
                 for wolf in wolves:
                     text = self.gateway.request_speech(self.state, wolf, Audience.WOLF, prompt)
                     self._add_event(visibility=EventVisibility.PRIVATE, channel="wolf", text=text, speaker=wolf, recipients=recipients)
+                    if not self._wolf_chat_done(text):
+                        round_all_done = False
+                if round_all_done:
+                    break
             self.state.phase = Phase.WOLF_ACTION
             wolf_targets = tuple(seat for seat in self.state.living_seats() if seat not in wolves)
             wolf_specs = [ActionSpec(ActionType.NO_OP, description="今晚不击杀")]
@@ -231,6 +235,17 @@ class GameEngine:
         self._public(f"投票结果：{label_seat(eliminated)} 被放逐出局。")
         if evaluate_winner(self.state) is None:
             self._last_words(eliminated)
+
+    def _wolf_chat_prompt(self, *, round_idx: int, wolf_count: int) -> str:
+        if wolf_count == 1:
+            return "你是当前唯一存活的狼人，请分析局势并决定今晚的击杀目标。若你已无补充，可直接回复：无更多讨论。"
+        if round_idx == 0:
+            return "【第1轮讨论】请分析当前局势，提出今晚的击杀目标建议，并说明理由。如果你目前没有更多要补充的内容，也可以直接回复：无更多讨论。"
+        return f"【第{round_idx + 1}轮讨论】请回应队友建议，确认或调整击杀目标；若你已无更多讨论内容，请直接回复：无更多讨论。"
+
+    def _wolf_chat_done(self, text: str) -> bool:
+        normalized = ''.join(ch for ch in str(text).strip() if not ch.isspace())
+        return normalized in {"无更多讨论", "没有更多讨论", "无更多可讨论", "无更多可补充"}
 
     def _wolf_action_summary(self) -> str:
         target = self.state.current_night.wolf_target

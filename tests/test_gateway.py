@@ -261,6 +261,35 @@ class GatewayTests(unittest.TestCase):
         request = gateway._build_base_request(state, 'p4', '请选择是否救人、下毒，或什么都不做。')
         self.assertFalse(gateway._should_hide_request_details(state, 'p4', request))
 
+    def test_hidden_night_clock_stays_active_until_visible_event(self) -> None:
+        state = self._state()
+        state.phase = Phase.WOLF_CHAT
+        human = HumanCliParticipant('你')
+        gateway = ParticipantGateway({'p1': human, 'p2': GoodParticipant('good')}, VisibilityCompiler())
+        events: list[str] = []
+
+        def fake_start_clock():
+            events.append('start')
+
+        def fake_stop_clock():
+            events.append('stop')
+
+        gateway._start_clock = fake_start_clock  # type: ignore[method-assign]
+        gateway._stop_clock = fake_stop_clock  # type: ignore[method-assign]
+        speech_request = gateway._build_base_request(state, 'p2', '请向狼人队友发送一句简短消息。')
+        speech_request['audience'] = Audience.WOLF.value
+        with redirect_stdout(io.StringIO()):
+            gateway._announce_wait(state, 'p2', 'speech', speech_request)
+            gateway._start_wait_clock(hidden_wait=True, day=1)
+            gateway._stop_wait_clock(hidden_wait=True)
+            gateway._announce_wait(state, 'p2', 'speech', speech_request)
+            gateway._start_wait_clock(hidden_wait=True, day=1)
+            gateway._stop_wait_clock(hidden_wait=True)
+            state.add_event(visibility=EventVisibility.PUBLIC, channel='system', text='天亮了')
+            gateway.on_event(state.transcript[-1])
+        self.assertEqual(events.count('start'), 1)
+        self.assertEqual(events.count('stop'), 1)
+
 
 
 if __name__ == "__main__":

@@ -119,5 +119,92 @@ class CliTests(unittest.TestCase):
                 verify_kimi_cli_ready(participant)
         self.assertIn('Invalid Authentication', str(ctx.exception))
 
+    def test_debug2_example_assigns_one_claude_and_one_human(self) -> None:
+        from wolfkill.participants import ClaudeCliParticipant, HumanCliParticipant
+        config = cli.load_config('examples/debug2-you-plus-1claude.json')
+        participants = cli.build_participants(
+            preset=cli.get_preset('duel-2'),
+            seed=7,
+            config=config,
+            human_seat='p1',
+            human_name='你',
+        )
+        claude_count = sum(isinstance(adapter, ClaudeCliParticipant) for adapter in participants.values())
+        human_count = sum(isinstance(adapter, HumanCliParticipant) for adapter in participants.values())
+        self.assertEqual(claude_count, 1)
+        self.assertEqual(human_count, 1)
+
+    def test_debug4_example_assigns_human_kimi_claude_codex(self) -> None:
+        from wolfkill.participants import ClaudeCliParticipant, CodexCliParticipant, HumanCliParticipant, KimiCliParticipant
+        config = cli.load_config('examples/debug4-you-kimi-claude-codex-all-wolves.json')
+        participants = cli.build_participants(
+            preset=cli.get_preset('all-wolf-4'),
+            seed=7,
+            config=config,
+            human_seat='p1',
+            human_name='你',
+        )
+        self.assertIsInstance(participants['p1'], HumanCliParticipant)
+        self.assertIsInstance(participants['p2'], KimiCliParticipant)
+        self.assertIsInstance(participants['p3'], ClaudeCliParticipant)
+        self.assertIsInstance(participants['p4'], CodexCliParticipant)
+
+    def test_find_reviewer_uses_isolated_claude_review_session(self) -> None:
+        from wolfkill.participants import ClaudeCliParticipant
+        reviewer = cli._find_reviewer({'p1': ClaudeCliParticipant(name='Claude', env={'http_proxy':'http://127.0.0.1:7890'})})
+        self.assertIsNotNone(reviewer)
+        kind, command, env, cwd = reviewer
+        self.assertEqual(kind, 'claude_json')
+        self.assertIn('--session-id', command)
+        self.assertIn('--no-session-persistence', command)
+        self.assertNotIn('--resume', command)
+
+    def test_find_reviewer_uses_isolated_kimi_review_session(self) -> None:
+        from wolfkill.participants import KimiCliParticipant
+        reviewer = cli._find_reviewer({'p1': KimiCliParticipant(name='Kimi', model='kimi-code/kimi-for-coding')})
+        self.assertIsNotNone(reviewer)
+        kind, command, env, cwd = reviewer
+        self.assertEqual(kind, 'kimi_stream_json')
+        self.assertIn('--session', command)
+        self.assertIn('review-', command[command.index('--session') + 1])
+        self.assertIn('stream-json', command)
+
+    def test_post_game_review_parses_kimi_stream_json_output(self) -> None:
+        import subprocess
+        from wolfkill.participants import KimiCliParticipant
+        from wolfkill.presets import create_state_from_role_map
+        from wolfkill.models import Role, Team
+        state = create_state_from_role_map('classic-6', 7, {'p1': Role.WOLF, 'p2': Role.WOLF, 'p3': Role.SEER, 'p4': Role.WITCH, 'p5': Role.VILLAGER, 'p6': Role.VILLAGER})
+        state.winner = Team.WOLF
+        participant = KimiCliParticipant(name='Kimi', model='kimi-code/kimi-for-coding')
+        payload = '{"role":"assistant","content":[{"type":"text","text":"复盘输出"}]}'
+        with patch('wolfkill.cli.subprocess.run', return_value=subprocess.CompletedProcess(['kimi'], 0, stdout=payload, stderr='')):
+            with redirect_stdout(io.StringIO()):
+                output = cli.post_game_review(state, {'p1': participant})
+        self.assertEqual(output, '复盘输出')
+
+    def test_load_learn_history_uses_strategy_guide_whitelist_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            learn_dir = Path(temp_dir)
+            (learn_dir / '000_狼人杀进阶策略知识库.md').write_text('策略知识', encoding='utf-8')
+            (learn_dir / 'strategy_guide.md').write_text('策略指南', encoding='utf-8')
+            (learn_dir / '20260307_184850-game.md').write_text('旧对局记录', encoding='utf-8')
+            (learn_dir / 'game_20260307_183403.md').write_text('旧风格对局记录', encoding='utf-8')
+            history = cli.load_learn_history(learn_dir)
+        self.assertEqual(history, ['策略指南'])
+
+    def test_resolve_learn_dir_walks_up_from_examples_base_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            examples_dir = root / 'examples'
+            examples_dir.mkdir()
+            learn_dir = root / 'learn'
+            learn_dir.mkdir()
+            (learn_dir / 'strategy_guide.md').write_text('策略指南', encoding='utf-8')
+
+            resolved = cli.resolve_learn_dir(examples_dir)
+
+        self.assertEqual(resolved, learn_dir)
+
 if __name__ == '__main__':
     unittest.main()

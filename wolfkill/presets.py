@@ -19,6 +19,16 @@ _PRESETS: dict[str, Preset] = {
         seat_order=("p1", "p2", "p3", "p4", "p5", "p6"),
         roles=(Role.WOLF, Role.WOLF, Role.SEER, Role.WITCH, Role.VILLAGER, Role.VILLAGER),
     ),
+    "duel-2": Preset(
+        name="duel-2",
+        seat_order=("p1", "p2"),
+        roles=(Role.WOLF, Role.WOLF),
+    ),
+    "all-wolf-4": Preset(
+        name="all-wolf-4",
+        seat_order=("p1", "p2", "p3", "p4"),
+        roles=(Role.WOLF, Role.WOLF, Role.WOLF, Role.WOLF),
+    ),
 }
 
 

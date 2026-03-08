@@ -1,0 +1,43 @@
+{
+  "preset": "classic-6",
+  "narration_delay_seconds": 1,
+  "participants": {
+    "p2": {
+      "type": "codex_cli",
+      "name": "Codex P2",
+      "background": "Play fast, stay in character, and return strict JSON.",
+      "sandbox": "read-only"
+    },
+    "p3": {
+      "type": "codex_cli",
+      "name": "Codex P3",
+      "background": "Use only visible information and return strict JSON.",
+      "sandbox": "read-only"
+    },
+    "p4": {
+      "type": "claude_cli",
+      "name": "Claude P4",
+      "background": "Play cautiously, stay in character, and return strict JSON.",
+      "model": "claude-sonnet-4-6",
+      "effort": "medium",
+      "env": {
+        "http_proxy": "http://127.0.0.1:7890",
+        "https_proxy": "http://127.0.0.1:7890",
+        "HTTP_PROXY": "http://127.0.0.1:7890",
+        "HTTPS_PROXY": "http://127.0.0.1:7890"
+      }
+    },
+    "p5": {
+      "type": "kimi_cli",
+      "name": "Kimi P5",
+      "background": "Reason only from visible state and return strict JSON.",
+      "model": "kimi-code/kimi-for-coding"
+    },
+    "p6": {
+      "type": "kimi_cli",
+      "name": "Kimi P6",
+      "background": "Play cautiously and return strict JSON.",
+      "model": "kimi-code/kimi-for-coding"
+    }
+  }
+}

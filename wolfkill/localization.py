@@ -49,7 +49,7 @@ _ISSUE_KIND_LABELS = {
 _ISSUE_MODE_LABELS = {"speech": "发言", "decision": "行动"}
 _VISIBILITY_LABELS = {EventVisibility.PUBLIC.value: "公开", EventVisibility.PRIVATE.value: "私有"}
 _AUDIENCE_LABELS = {Audience.PUBLIC.value: "公开", Audience.WOLF.value: "狼人频道"}
-_PRESET_LABELS = {"classic-6": "经典六人局"}
+_PRESET_LABELS = {"classic-6": "经典六人局", "duel-2": "双狼双人调试局", "all-wolf-4": "四狼四人互通调试局"}
 
 
 def label_phase(value: Phase | str | None) -> str:

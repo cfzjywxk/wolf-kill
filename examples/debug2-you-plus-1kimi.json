@@ -1,0 +1,13 @@
+{
+  "preset": "duel-2",
+  "max_days": 1,
+  "narration_delay_seconds": 1,
+  "participants": {
+    "p2": {
+      "type": "kimi_cli",
+      "name": "Kimi Debug",
+      "background": "You are in a 2-player smoke test. Stay in character and return strict JSON.",
+      "model": "kimi-code/kimi-for-coding"
+    }
+  }
+}

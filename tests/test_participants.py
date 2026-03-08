@@ -42,6 +42,27 @@ class ParticipantAdapterTests(unittest.TestCase):
         self.assertIn("resume", captured[1])
         self.assertIn("thread-1", captured[1])
 
+    def test_verify_claude_cli_ready_fails_fast_on_invalid_authentication(self) -> None:
+        participant = ClaudeCliParticipant(
+            name="Claude Auth Fail",
+            model="claude-sonnet-4-6",
+            env={"http_proxy": "http://127.0.0.1:7890", "https_proxy": "http://127.0.0.1:7890", "HTTP_PROXY": "http://127.0.0.1:7890", "HTTPS_PROXY": "http://127.0.0.1:7890"},
+        )
+        calls = 0
+
+        def fake_run(command, **kwargs):
+            nonlocal calls
+            calls += 1
+            if command[:2] == ['curl', '-s']:
+                return subprocess.CompletedProcess(command, 0, stdout='154.28.2.59\n', stderr='')
+            return subprocess.CompletedProcess(command, 0, stdout='Error code: 401 - invalid authentication', stderr='')
+
+        with patch('wolfkill.participants.shutil.which', return_value='/usr/bin/claude'), patch('wolfkill.participants.subprocess.run', side_effect=fake_run):
+            with self.assertRaises(RuntimeError) as ctx:
+                verify_claude_cli_ready(participant)
+        self.assertIn('鉴权失败', str(ctx.exception))
+        self.assertGreaterEqual(calls, 2)
+
     def test_claude_cli_participant_uses_required_model_and_effort(self) -> None:
         participant = ClaudeCliParticipant(name="Claude P4", cwd="/tmp/wolfkill-claude")
         captured: list[list[str]] = []
@@ -60,6 +81,24 @@ class ParticipantAdapterTests(unittest.TestCase):
         self.assertIn("--effort", captured[0])
         self.assertIn("medium", captured[0])
         self.assertEqual(participant.session_id, "claude-session-1")
+
+    def test_claude_cli_participant_accepts_structured_output_when_result_is_empty(self) -> None:
+        participant = ClaudeCliParticipant(name="Claude Structured", cwd="/tmp/wolfkill-claude")
+
+        def fake_run(command, **kwargs):
+            import json
+            payload = json.dumps({
+                "session_id": "claude-session-structured",
+                "result": "",
+                "structured_output": {"text": json.dumps({"text": "structured ok"})},
+            })
+            return subprocess.CompletedProcess(command, 0, stdout=payload, stderr="")
+
+        with patch("wolfkill.participants.subprocess.run", side_effect=fake_run):
+            response = participant.speak(self.speech_request)
+
+        self.assertEqual(response["text"], "structured ok")
+        self.assertEqual(participant.session_id, "claude-session-structured")
 
     def test_claude_cli_participant_resumes_same_session(self) -> None:
         participant = ClaudeCliParticipant(name="Claude Resume", cwd="/tmp/wolfkill-claude")
@@ -93,7 +132,7 @@ class ParticipantAdapterTests(unittest.TestCase):
 
         with patch('wolfkill.participants.shutil.which', return_value='/usr/bin/claude'), patch('wolfkill.participants.subprocess.run', side_effect=fake_run):
             verify_claude_cli_ready(participant)
-        self.assertEqual(calls, 1)
+        self.assertGreaterEqual(calls, 2)
 
     def test_kimi_cli_participant_reuses_same_session_id_across_calls(self) -> None:
         participant = KimiCliParticipant(name="Kimi P2", cwd="/tmp/wolfkill-kimi", timeout_seconds=9.0, model="moonshot-test", agent="default")
