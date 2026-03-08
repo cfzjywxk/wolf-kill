@@ -50,6 +50,112 @@ class EngineTests(unittest.TestCase):
         result = resolve_vote({"p1": "p3", "p2": "p4", "p3": "p4", "p4": "p3"}, ("p1", "p2", "p3", "p4"))
         self.assertIsNone(result)
 
+    def test_day_vote_tie_enters_pk_round_and_eliminates_pk_loser(self) -> None:
+        state = create_state_from_role_map("classic-6", 7, {"p1": Role.VILLAGER, "p2": Role.WOLF, "p3": Role.WOLF, "p4": Role.SEER, "p5": Role.WITCH, "p6": Role.VILLAGER})
+        gateway = ParticipantGateway({seat: MockParticipant(f"Mock {seat}", seed=7 + idx) for idx, seat in enumerate(state.seat_order)}, VisibilityCompiler())
+        engine = GameEngine(state, gateway, max_days=1)
+        action_rounds: list[list[tuple[str, list[ActionSpec], str]]] = []
+
+        def fake_request_speech(current_state, seat, audience, prompt):
+            if "遗言" in prompt:
+                return f"{seat}遗言"
+            if "PK 发言" in prompt or "进入 PK 发言" in prompt:
+                return f"{seat}PK发言"
+            return f"{seat}白天发言"
+
+        def fake_request_actions_parallel(current_state, seat_specs):
+            action_rounds.append(seat_specs)
+            if len(action_rounds) == 1:
+                return {
+                    "p1": Decision(ActionType.DAY_VOTE, "p6"),
+                    "p2": Decision(ActionType.DAY_VOTE, "p6"),
+                    "p3": Decision(ActionType.DAY_VOTE, "p6"),
+                    "p4": Decision(ActionType.DAY_VOTE, "p3"),
+                    "p5": Decision(ActionType.DAY_VOTE, "p3"),
+                    "p6": Decision(ActionType.DAY_VOTE, "p3"),
+                }
+            return {
+                "p1": Decision(ActionType.DAY_VOTE, "p6"),
+                "p2": Decision(ActionType.DAY_VOTE, "p6"),
+                "p4": Decision(ActionType.DAY_VOTE, "p3"),
+                "p5": Decision(ActionType.DAY_VOTE, "p6"),
+            }
+
+        gateway.request_speech = fake_request_speech  # type: ignore[method-assign]
+        gateway.request_actions_parallel = fake_request_actions_parallel  # type: ignore[method-assign]
+        with redirect_stdout(io.StringIO()):
+            engine._run_day()
+
+        self.assertEqual(len(action_rounds), 2)
+        self.assertEqual([seat for seat, _, _ in action_rounds[1]], ["p1", "p2", "p4", "p5"])
+        self.assertTrue(all(tuple(specs[0].targets) == ("p3", "p6") for _, specs, _ in action_rounds[1]))
+        self.assertFalse(state.players["p6"].alive)
+        self.assertTrue(state.players["p3"].alive)
+        public_system_texts = [event.text for event in state.transcript if event.visibility == EventVisibility.PUBLIC and event.channel == "system"]
+        self.assertIn("投票结果：3号位、6号位 平票，进入 PK 发言。", public_system_texts)
+        self.assertIn("PK投票结果：6号位 被放逐出局。", public_system_texts)
+        self.assertTrue(any(event.channel == "speech" and event.speaker == "p3" and event.text == "p3PK发言" for event in state.transcript))
+        self.assertTrue(any(event.channel == "speech" and event.speaker == "p6" and event.text == "p6PK发言" for event in state.transcript))
+        self.assertTrue(any(event.channel == "speech" and event.speaker == "p6" and event.text == "p6遗言" for event in state.transcript))
+
+    def test_day_vote_all_abstain_eliminates_nobody(self) -> None:
+        state = create_state_from_role_map("classic-6", 7, {"p1": Role.VILLAGER, "p2": Role.WOLF, "p3": Role.WOLF, "p4": Role.SEER, "p5": Role.WITCH, "p6": Role.VILLAGER})
+        gateway = ParticipantGateway({seat: MockParticipant(f"Mock {seat}", seed=7 + idx) for idx, seat in enumerate(state.seat_order)}, VisibilityCompiler())
+        engine = GameEngine(state, gateway, max_days=1)
+        action_rounds: list[list[tuple[str, list[ActionSpec], str]]] = []
+
+        def fake_request_speech(current_state, seat, audience, prompt):
+            return f"{seat}白天发言"
+
+        def fake_request_actions_parallel(current_state, seat_specs):
+            action_rounds.append(seat_specs)
+            return {seat: Decision(ActionType.NO_OP) for seat, _, _ in seat_specs}
+
+        gateway.request_speech = fake_request_speech  # type: ignore[method-assign]
+        gateway.request_actions_parallel = fake_request_actions_parallel  # type: ignore[method-assign]
+        with redirect_stdout(io.StringIO()):
+            engine._run_day()
+
+        self.assertEqual(len(action_rounds), 1)
+        self.assertTrue(all(player.alive for player in state.players.values()))
+        public_system_texts = [event.text for event in state.transcript if event.visibility == EventVisibility.PUBLIC and event.channel == "system"]
+        self.assertIn("投票结果：全部弃票，无人出局。", public_system_texts)
+        self.assertFalse(any("PK" in text for text in public_system_texts))
+
+    def test_pk_vote_all_abstain_eliminates_nobody(self) -> None:
+        state = create_state_from_role_map("classic-6", 7, {"p1": Role.VILLAGER, "p2": Role.WOLF, "p3": Role.WOLF, "p4": Role.SEER, "p5": Role.WITCH, "p6": Role.VILLAGER})
+        gateway = ParticipantGateway({seat: MockParticipant(f"Mock {seat}", seed=7 + idx) for idx, seat in enumerate(state.seat_order)}, VisibilityCompiler())
+        engine = GameEngine(state, gateway, max_days=1)
+        action_rounds: list[list[tuple[str, list[ActionSpec], str]]] = []
+
+        def fake_request_speech(current_state, seat, audience, prompt):
+            if "PK 发言" in prompt or "进入 PK 发言" in prompt:
+                return f"{seat}PK发言"
+            return f"{seat}白天发言"
+
+        def fake_request_actions_parallel(current_state, seat_specs):
+            action_rounds.append(seat_specs)
+            if len(action_rounds) == 1:
+                return {
+                    "p1": Decision(ActionType.DAY_VOTE, "p6"),
+                    "p2": Decision(ActionType.DAY_VOTE, "p6"),
+                    "p3": Decision(ActionType.DAY_VOTE, "p6"),
+                    "p4": Decision(ActionType.DAY_VOTE, "p3"),
+                    "p5": Decision(ActionType.DAY_VOTE, "p3"),
+                    "p6": Decision(ActionType.DAY_VOTE, "p3"),
+                }
+            return {seat: Decision(ActionType.NO_OP) for seat, _, _ in seat_specs}
+
+        gateway.request_speech = fake_request_speech  # type: ignore[method-assign]
+        gateway.request_actions_parallel = fake_request_actions_parallel  # type: ignore[method-assign]
+        with redirect_stdout(io.StringIO()):
+            engine._run_day()
+
+        self.assertEqual(len(action_rounds), 2)
+        self.assertTrue(all(player.alive for player in state.players.values()))
+        public_system_texts = [event.text for event in state.transcript if event.visibility == EventVisibility.PUBLIC and event.channel == "system"]
+        self.assertIn("PK投票结果：全部弃票，无人出局。", public_system_texts)
+
     def test_full_mock_game_is_deterministic(self) -> None:
         first = self._run_mock_game(seed=11)
         second = self._run_mock_game(seed=11)

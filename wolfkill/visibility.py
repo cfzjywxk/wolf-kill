@@ -24,6 +24,7 @@ class VisibilityCompiler:
         result: dict = {
             "day": state.day,
             "phase": state.phase.value,
+            "seat_order": list(state.seat_order),
             "alive_seats": state.living_seats(),
             "dead_players": [
                 {
@@ -35,6 +36,8 @@ class VisibilityCompiler:
             ],
             "winner": state.winner.value if state.winner else None,
         }
+        if state.phase.value == "DAY_SPEECH":
+            result["day_speaking_order"] = state.living_seats()
         if since_event_id > 0:
             result["new_public_events"] = [event.to_dict() for event in events]
         else:

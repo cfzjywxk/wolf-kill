@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import io
+import json
+import tempfile
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 from contextlib import redirect_stdout
 
 from wolfkill import colors
+from wolfkill.debug_logging import AgentDebugLogger
 from wolfkill.gateway import ParticipantGateway
 from wolfkill.models import ActionSpec, ActionType, Audience, EventVisibility, Phase, Role
 from wolfkill.participants import HumanCliParticipant, ParticipantAdapter
@@ -40,6 +44,28 @@ class GatewayTests(unittest.TestCase):
             decision = gateway.request_action(state, "p1", [ActionSpec(ActionType.DAY_VOTE, targets=("p2",), requires_target=True), ActionSpec(ActionType.NO_OP)], "Vote now.")
         self.assertEqual(decision.action_type, ActionType.NO_OP)
         self.assertEqual(len(gateway.issues), 1)
+
+    def test_gateway_writes_agent_debug_log_entries(self) -> None:
+        state = self._state()
+        state.phase = Phase.DAY_SPEECH
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "agent-debug.jsonl"
+            gateway = ParticipantGateway({"p1": GoodParticipant("good")}, VisibilityCompiler(), debug_logger=AgentDebugLogger(log_path))
+            event = state.add_event(visibility=EventVisibility.PUBLIC, channel="system", text="开局公开信息")
+            with redirect_stdout(io.StringIO()):
+                gateway.on_event(event)
+                gateway.request_speech(state, "p1", Audience.PUBLIC, "请发表一句简短的白天发言。")
+            entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+        kinds = [entry["kind"] for entry in entries]
+        self.assertIn("event", kinds)
+        self.assertIn("agent_call", kinds)
+        event_entry = next(entry for entry in entries if entry["kind"] == "event")
+        self.assertEqual(event_entry["event"]["text"], "开局公开信息")
+        agent_entry = next(entry for entry in entries if entry["kind"] == "agent_call")
+        self.assertEqual(agent_entry["seat"], "p1")
+        self.assertEqual(agent_entry["request"]["phase"], Phase.DAY_SPEECH.value)
+        self.assertEqual(agent_entry["final_response"]["text"], "测试发言")
 
     def test_gateway_prints_waiting_status_for_speech(self) -> None:
         state = self._state()

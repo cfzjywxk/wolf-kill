@@ -1,0 +1,50 @@
+{
+  "preset": "classic-6",
+  "narration_delay_seconds": 1,
+  "participants": {
+    "p2": {
+      "type": "claude_cli",
+      "name": "Claude P2",
+      "background": "Play cautiously, stay in character, and return strict JSON.",
+      "model": "claude-sonnet-4-6",
+      "effort": "medium",
+      "env": {
+        "http_proxy": "http://127.0.0.1:7890",
+        "https_proxy": "http://127.0.0.1:7890",
+        "HTTP_PROXY": "http://127.0.0.1:7890",
+        "HTTPS_PROXY": "http://127.0.0.1:7890"
+      }
+    },
+    "p3": {
+      "type": "claude_cli",
+      "name": "Claude P3",
+      "background": "Reason only from visible state and return strict JSON.",
+      "model": "claude-sonnet-4-6",
+      "effort": "medium",
+      "env": {
+        "http_proxy": "http://127.0.0.1:7890",
+        "https_proxy": "http://127.0.0.1:7890",
+        "HTTP_PROXY": "http://127.0.0.1:7890",
+        "HTTPS_PROXY": "http://127.0.0.1:7890"
+      }
+    },
+    "p4": {
+      "type": "kimi_cli",
+      "name": "Kimi P4",
+      "background": "Play cautiously and return strict JSON.",
+      "model": "kimi-code/kimi-for-coding"
+    },
+    "p5": {
+      "type": "kimi_cli",
+      "name": "Kimi P5",
+      "background": "Reason only from visible state and return strict JSON.",
+      "model": "kimi-code/kimi-for-coding"
+    },
+    "p6": {
+      "type": "kimi_cli",
+      "name": "Kimi P6",
+      "background": "Stay in character, use only visible information, and return strict JSON.",
+      "model": "kimi-code/kimi-for-coding"
+    }
+  }
+}

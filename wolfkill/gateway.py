@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from .colors import bold, cyan, dim, green, magenta, red, seat_color, yellow
+from .debug_logging import AgentDebugLogger
 from .localization import format_event_line, label_action, label_seat, label_visibility, localize_request
 from .models import ActionSpec, ActionType, Audience, Decision, concrete_choices
 from .observer_visibility import ObserverVisibilityPolicy
@@ -14,7 +15,7 @@ from .visibility import VisibilityCompiler
 
 
 class ParticipantGateway:
-    def __init__(self, participants: dict[str, ParticipantAdapter], visibility: VisibilityCompiler, observer_seat: str | None = None, narration_delay_seconds: float = 0.0, learn_history: list[str] | None = None, previous_games: list[str] | None = None) -> None:
+    def __init__(self, participants: dict[str, ParticipantAdapter], visibility: VisibilityCompiler, observer_seat: str | None = None, narration_delay_seconds: float = 0.0, learn_history: list[str] | None = None, previous_games: list[str] | None = None, debug_logger: AgentDebugLogger | None = None) -> None:
         self.participants = participants
         self.visibility = visibility
         self.request_counter = 1
@@ -26,6 +27,7 @@ class ParticipantGateway:
         self.total_pause_seconds = 0.0
         self.learn_history = list(learn_history or [])
         self.previous_games = list(previous_games or [])
+        self.debug_logger = debug_logger
         self._current_wait_key: tuple[str, str] | None = None
         self._hidden_night_announced_day: int | None = None
         self._hidden_night_clock_day: int | None = None
@@ -38,6 +40,7 @@ class ParticipantGateway:
         request["audience"] = audience.value
         request_build_seconds = time.monotonic() - request_started_at
         adapter = self.participants[seat]
+        adapter.clear_last_call_exchange()
         wait_started_at = time.monotonic()
         self._announce_wait(state, seat, "speech", request)
         wait_announce_seconds = time.monotonic() - wait_started_at
@@ -47,21 +50,34 @@ class ParticipantGateway:
             self._start_wait_clock(hidden_wait=hidden_wait, day=int(state.day))
         adapter.clear_last_call_diagnostics()
         adapter_started_at = time.monotonic()
+        issue_message = None
+        issue_kind = None
+        fallback_used = False
         try:
             response = adapter.speak(request)
             text = str(response.get("text", "")).strip()
             if not text:
+                issue_message = "发言内容为空"
+                issue_kind = "invalid_response"
+                fallback_used = True
                 self._record_issue(seat, "speech", "发言内容为空", kind="invalid_response")
                 self._announce_issue(state, seat, "speech", "发言内容为空，已使用默认发言。")
                 text = "我先不发言。"
         except Exception as exc:
+            issue_message = str(exc).strip() or exc.__class__.__name__
+            issue_kind = getattr(exc, "kind", None) or self._issue_kind(issue_message)
+            fallback_used = True
             self._record_exception(seat, "speech", exc)
             self._announce_issue(state, seat, "speech", f"发言失败，已使用默认发言：{self._exception_brief(exc)}")
             text = "我先不发言。"
         finally:
             adapter_seconds = time.monotonic() - adapter_started_at
+            exchange_snapshot = dict(adapter.last_call_exchange or {})
+            diagnostics_snapshot = dict(adapter.last_call_diagnostics or {})
+            adapter.clear_last_call_exchange()
             if show_clock:
                 self._stop_wait_clock(hidden_wait=hidden_wait)
+        self._log_agent_call(seat=seat, adapter=adapter, mode="speech", request=request, diagnostics=diagnostics_snapshot, exchange=exchange_snapshot, final_response={"text": text}, issue_message=issue_message, issue_kind=issue_kind, fallback_used=fallback_used)
         if show_clock:
             record = self._record_wait_timing(state=state, seat=seat, mode="speech", request=request, adapter=adapter, total_seconds=time.monotonic() - started_at, adapter_seconds=adapter_seconds, request_build_seconds=request_build_seconds, wait_announce_seconds=wait_announce_seconds, done_announce_seconds=0.0, pause_seconds=self.total_pause_seconds - pause_before)
             done_started_at = time.monotonic()
@@ -77,6 +93,7 @@ class ParticipantGateway:
         request["options"] = [spec.to_dict() for spec in specs]
         request_build_seconds = time.monotonic() - request_started_at
         adapter = self.participants[seat]
+        adapter.clear_last_call_exchange()
         wait_started_at = time.monotonic()
         self._announce_wait(state, seat, "decision", request)
         wait_announce_seconds = time.monotonic() - wait_started_at
@@ -86,20 +103,33 @@ class ParticipantGateway:
             self._start_wait_clock(hidden_wait=hidden_wait, day=int(state.day))
         adapter.clear_last_call_diagnostics()
         adapter_started_at = time.monotonic()
+        issue_message = None
+        issue_kind = None
+        fallback_used = False
         try:
             response = adapter.decide(request)
             decision, issue = self._validate_decision(response, specs)
             if issue:
+                issue_message = issue
+                issue_kind = "invalid_response"
+                fallback_used = True
                 self._record_issue(seat, "decision", issue, kind="invalid_response")
                 self._announce_issue(state, seat, "decision", f"行动无效，已回退到默认动作：{issue}")
         except Exception as exc:
+            issue_message = str(exc).strip() or exc.__class__.__name__
+            issue_kind = getattr(exc, "kind", None) or self._issue_kind(issue_message)
+            fallback_used = True
             self._record_exception(seat, "decision", exc)
             self._announce_issue(state, seat, "decision", f"行动失败，已回退到默认动作：{self._exception_brief(exc)}")
             decision = self._fallback_decision(specs)
         finally:
             adapter_seconds = time.monotonic() - adapter_started_at
+            exchange_snapshot = dict(adapter.last_call_exchange or {})
+            diagnostics_snapshot = dict(adapter.last_call_diagnostics or {})
+            adapter.clear_last_call_exchange()
             if show_clock:
                 self._stop_wait_clock(hidden_wait=hidden_wait)
+        self._log_agent_call(seat=seat, adapter=adapter, mode="decision", request=request, diagnostics=diagnostics_snapshot, exchange=exchange_snapshot, final_response=decision.to_dict(), issue_message=issue_message, issue_kind=issue_kind, fallback_used=fallback_used)
         details = self._describe_decision(decision, specs)
         if show_clock:
             record = self._record_wait_timing(state=state, seat=seat, mode="decision", request=request, adapter=adapter, total_seconds=time.monotonic() - started_at, adapter_seconds=adapter_seconds, request_build_seconds=request_build_seconds, wait_announce_seconds=wait_announce_seconds, done_announce_seconds=0.0, pause_seconds=self.total_pause_seconds - pause_before, details=details)
@@ -134,19 +164,32 @@ class ParticipantGateway:
             request_build_seconds = time.monotonic() - request_started_at
             adapter = self.participants[seat]
             adapter.clear_last_call_diagnostics()
-            with lock:
-                    adapter_started_at = time.monotonic()
+            adapter.clear_last_call_exchange()
+            adapter_started_at = time.monotonic()
+            issue_message = None
+            issue_kind = None
+            fallback_used = False
             try:
                 response = adapter.decide(request)
                 decision, issue = self._validate_decision(response, specs)
                 if issue:
+                    issue_message = issue
+                    issue_kind = "invalid_response"
+                    fallback_used = True
                     with lock:
                         self._record_issue(seat, "decision", issue, kind="invalid_response")
             except Exception as exc:
+                issue_message = str(exc).strip() or exc.__class__.__name__
+                issue_kind = getattr(exc, "kind", None) or self._issue_kind(issue_message)
+                fallback_used = True
                 with lock:
                     self._record_exception(seat, "decision", exc)
                 decision = self._fallback_decision(specs)
             adapter_seconds = time.monotonic() - adapter_started_at
+            exchange_snapshot = dict(adapter.last_call_exchange or {})
+            diagnostics_snapshot = dict(adapter.last_call_diagnostics or {})
+            adapter.clear_last_call_exchange()
+            self._log_agent_call(seat=seat, adapter=adapter, mode="decision", request=request, diagnostics=diagnostics_snapshot, exchange=exchange_snapshot, final_response=decision.to_dict(), issue_message=issue_message, issue_kind=issue_kind, fallback_used=fallback_used)
             info = self._adapter_diagnostics(adapter, fallback_seconds=adapter_seconds, request=request)
             with lock:
                 results[seat] = decision
@@ -201,6 +244,8 @@ class ParticipantGateway:
             self._remember_observer_event(event.index)
 
     def on_event(self, event) -> None:
+        if self.debug_logger is not None:
+            self.debug_logger.log("event", event=event.to_dict())
         policy = self._observer_visibility_policy()
         if not policy.can_observer_receive_event(event):
             return
@@ -231,6 +276,33 @@ class ParticipantGateway:
             adapter.last_sent_event_id = state.transcript[-1].index
         self.request_counter += 1
         return localize_request(request)
+
+    def _log_agent_call(self, *, seat: str, adapter: ParticipantAdapter, mode: str, request: dict[str, Any], diagnostics: dict[str, Any], exchange: dict[str, Any], final_response: dict[str, Any], issue_message: str | None, issue_kind: str | None, fallback_used: bool) -> None:
+        if self.debug_logger is None or isinstance(adapter, HumanCliParticipant):
+            return
+        self.debug_logger.log(
+            "agent_call",
+            seat=seat,
+            participant=adapter.name,
+            provider=getattr(adapter, "provider_label", adapter.__class__.__name__.lower()),
+            mode=mode,
+            request_id=request.get("request_id"),
+            phase=request.get("phase"),
+            context_mode=request.get("context_mode"),
+            prompt=request.get("prompt"),
+            request=request,
+            diagnostics=diagnostics,
+            prompt_text=exchange.get("prompt"),
+            raw_output=exchange.get("raw_output"),
+            parsed_response=exchange.get("parsed_response"),
+            parse_mode=exchange.get("parse_mode") or diagnostics.get("parse_mode"),
+            error=exchange.get("error"),
+            stdout=exchange.get("stdout"),
+            stderr=exchange.get("stderr"),
+            final_response=final_response,
+            issue={"kind": issue_kind, "message": issue_message} if issue_message else None,
+            fallback_used=bool(fallback_used),
+        )
 
     def _validate_decision(self, response: dict[str, Any], specs: list[ActionSpec]) -> tuple[Decision, str | None]:
         raw_action = response.get("action_type") or response.get("action") or response.get("type")

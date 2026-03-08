@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .colors import bold, cyan, dim, green, magenta, red, seat_color, yellow
+from .debug_logging import AgentDebugLogger
 from .engine import GameEngine, build_previous_game_summary
 from .gateway import ParticipantGateway
 from .localization import (
@@ -74,6 +75,7 @@ def run_command(args, *, explicit_flags: set[str] | None = None) -> int:
     preset = get_preset(preset_name)
     project_dir = Path(config.get("_base_dir", ".")).resolve()
     learn_dir = resolve_learn_dir(project_dir)
+    logs_dir = resolve_logs_dir(project_dir)
     learn_dir.mkdir(exist_ok=True)
     learn_history = load_learn_history(learn_dir)
     participants: dict | None = None
@@ -125,13 +127,16 @@ def run_command(args, *, explicit_flags: set[str] | None = None) -> int:
                 names=names,
                 backgrounds=backgrounds,
             )
+            debug_log_path = logs_dir / f"{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}-game{game_number}-seed{current_seed}-agent-debug.jsonl"
             gateway = ParticipantGateway(
                 participants,
                 VisibilityCompiler(),
                 narration_delay_seconds=narration_delay_seconds,
                 learn_history=learn_history,
                 previous_games=previous_games,
+                debug_logger=AgentDebugLogger(debug_log_path),
             )
+            print(dim(f"【诊断】AI 调试日志写入：{debug_log_path}"))
             if narration_delay_seconds > 0:
                 print(dim(f"【诊断】当前播报停顿为 {narration_delay_seconds:.1f}s/条；这部分属于程序自身额外耗时。"))
             final_state = GameEngine(
@@ -309,6 +314,13 @@ def resolve_learn_dir(base_dir: Path) -> Path:
     return package_root / "learn"
 
 
+def resolve_logs_dir(base_dir: Path) -> Path:
+    package_root = Path(__file__).resolve().parent.parent
+    log_dir = package_root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir
+
+
 def load_learn_history(learn_dir: Path) -> list[str]:
     if not learn_dir.is_dir():
         return []
@@ -353,6 +365,8 @@ def save_game_record(state, review_text: str | None, learn_dir: Path, *, gateway
     if timing_summary is not None:
         lines.extend(["", "## 等待耗时统计", ""])
         lines.extend(build_gateway_timing_report_lines(timing_summary))
+    if gateway is not None and getattr(gateway, "debug_logger", None) is not None:
+        lines.extend(["", "## 调试日志", "", f"- AI 调试日志：{gateway.debug_logger.path}"])
     if gateway is not None and gateway.issues:
         lines.extend(["", "## 运行问题详情", ""])
         lines.extend(build_gateway_issue_report_lines(gateway.issues))

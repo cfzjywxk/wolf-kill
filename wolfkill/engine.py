@@ -19,6 +19,15 @@ def resolve_vote(votes: dict[str, str | None], candidate_order: tuple[str, ...] 
     return sorted(top_targets, key=lambda item: order.index(item))[0]
 
 
+def top_vote_targets(votes: dict[str, str | None], candidate_order: tuple[str, ...] | list[str]) -> list[str]:
+    counts = Counter(target for target in votes.values() if target)
+    if not counts:
+        return []
+    top_score = max(counts.values())
+    order = list(candidate_order)
+    return sorted([target for target, score in counts.items() if score == top_score], key=lambda item: order.index(item))
+
+
 def resolve_wolf_target(votes: dict[str, str | None], candidate_order: tuple[str, ...] | list[str]) -> str | None:
     counts = Counter(target for target in votes.values() if target)
     if not counts:
@@ -213,28 +222,77 @@ class GameEngine:
             self._add_event(visibility=EventVisibility.PUBLIC, channel="speech", text=text, speaker=seat)
         self.state.phase = Phase.DAY_VOTE
         alive = self.state.living_seats()
+        votes = self._collect_vote_round(voters=alive, candidates=alive, prompt="请选择你的白天投票。")
+        vote_details = self._format_vote_details(votes)
+        self._public(f"投票详情：{vote_details}。")
+        top_targets = top_vote_targets(votes, alive)
+        if not top_targets:
+            self._public("投票结果：全部弃票，无人出局。")
+            return
+        if len(top_targets) > 1:
+            pk_labels = "、".join(label_seat(seat) for seat in top_targets)
+            self._public(f"投票结果：{pk_labels} 平票，进入 PK 发言。")
+            eliminated = self._run_pk_round(alive=alive, pk_seats=top_targets)
+            if eliminated is None:
+                return
+        else:
+            eliminated = top_targets[0]
+            self._apply_vote_elimination(eliminated, result_label="投票结果")
+            if evaluate_winner(self.state) is None:
+                self._last_words(eliminated)
+
+    def _collect_vote_round(self, *, voters: list[str], candidates: list[str], prompt: str) -> dict[str, str | None]:
+        if not voters:
+            return {}
         seat_specs: list[tuple[str, list[ActionSpec], str]] = []
-        for seat in alive:
-            targets = tuple(candidate for candidate in alive if candidate != seat)
+        for seat in voters:
+            targets = tuple(candidate for candidate in candidates if candidate != seat)
             specs = [ActionSpec(ActionType.NO_OP, description="弃票")]
             if targets:
                 specs.insert(0, ActionSpec(ActionType.DAY_VOTE, targets=targets, requires_target=True, description="投票放逐一名玩家"))
-            seat_specs.append((seat, specs, "请选择你的白天投票。"))
+            seat_specs.append((seat, specs, prompt))
         decisions = self.gateway.request_actions_parallel(self.state, seat_specs)
         votes: dict[str, str | None] = {}
-        for seat in alive:
+        for seat in voters:
             decision = decisions[seat]
             votes[seat] = decision.target if decision.action_type == ActionType.DAY_VOTE else None
-        vote_details = "、".join(f"{label_seat(seat)}→{label_seat(target) if target else '弃票'}" for seat, target in votes.items())
-        self._public(f"投票详情：{vote_details}。")
-        eliminated = resolve_vote(votes, alive)
-        if eliminated is None:
-            self._public("投票结果：平票或全部弃票，无人出局。")
-            return
-        self._apply_deaths({eliminated: {DeathCause.VOTE}})
-        self._public(f"投票结果：{label_seat(eliminated)} 被放逐出局。")
+        return votes
+
+    def _format_vote_details(self, votes: dict[str, str | None]) -> str:
+        if not votes:
+            return "无人有投票资格"
+        return "、".join(f"{label_seat(seat)}→{label_seat(target) if target else '弃票'}" for seat, target in votes.items())
+
+    def _run_pk_round(self, *, alive: list[str], pk_seats: list[str]) -> str | None:
+        pk_labels = "、".join(label_seat(seat) for seat in pk_seats)
+        self._public(f"进入 PK 发言：{pk_labels}。")
+        self.state.phase = Phase.DAY_SPEECH
+        for seat in pk_seats:
+            text = self.gateway.request_speech(self.state, seat, Audience.PUBLIC, "你进入 PK 发言。请针对刚才的争议、他人对你的质疑，以及你今天为什么不该被放逐，再进行一轮发言。")
+            self._add_event(visibility=EventVisibility.PUBLIC, channel="speech", text=text, speaker=seat)
+        self.state.phase = Phase.DAY_VOTE
+        voters = [seat for seat in alive if seat not in pk_seats]
+        self._public(f"现在开始 PK 投票；除 {pk_labels} 外其余玩家请在 PK 玩家中选择一人投票。")
+        votes = self._collect_vote_round(voters=voters, candidates=pk_seats, prompt="这是 PK 投票，只能在 PK 玩家中选择一人放逐。请选择你的 PK 投票。")
+        vote_details = self._format_vote_details(votes)
+        suffix = f"；{pk_labels} 不参与投票" if pk_seats else ""
+        self._public(f"PK投票详情：{vote_details}{suffix}。")
+        top_targets = top_vote_targets(votes, pk_seats)
+        if not top_targets:
+            self._public("PK投票结果：全部弃票，无人出局。")
+            return None
+        if len(top_targets) > 1:
+            self._public("PK投票结果：再次平票，无人出局。")
+            return None
+        eliminated = top_targets[0]
+        self._apply_vote_elimination(eliminated, result_label="PK投票结果")
         if evaluate_winner(self.state) is None:
             self._last_words(eliminated)
+        return eliminated
+
+    def _apply_vote_elimination(self, seat: str, *, result_label: str) -> None:
+        self._apply_deaths({seat: {DeathCause.VOTE}})
+        self._public(f"{result_label}：{label_seat(seat)} 被放逐出局。")
 
     def _wolf_chat_prompt(self, *, round_idx: int, wolf_count: int) -> str:
         if wolf_count == 1:

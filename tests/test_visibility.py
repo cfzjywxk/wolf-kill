@@ -93,6 +93,51 @@ class VisibilityTests(unittest.TestCase):
         self.assertNotIn('role', dead_player)
         self.assertNotIn('death_causes', dead_player)
 
+    def test_public_state_includes_explicit_seat_order_and_day_speaking_order(self) -> None:
+        state = create_state_from_role_map(
+            "classic-6",
+            7,
+            {"p1": Role.WOLF, "p2": Role.WOLF, "p3": Role.SEER, "p4": Role.WITCH, "p5": Role.VILLAGER, "p6": Role.VILLAGER},
+        )
+        state.phase = Phase.DAY_SPEECH
+        compiler = VisibilityCompiler()
+
+        public_state = compiler.public_state(state)
+
+        self.assertEqual(public_state["seat_order"], ["p1", "p2", "p3", "p4", "p5", "p6"])
+        self.assertEqual(public_state["day_speaking_order"], ["p1", "p2", "p3", "p4", "p5", "p6"])
+
+    def test_wolf_view_does_not_expose_witch_identity_from_ambiguous_last_words(self) -> None:
+        state = create_state_from_role_map(
+            "classic-6",
+            7,
+            {"p1": Role.VILLAGER, "p2": Role.WITCH, "p3": Role.VILLAGER, "p4": Role.SEER, "p5": Role.WOLF, "p6": Role.WOLF},
+        )
+        state.phase = Phase.DAY_VOTE
+        state.players["p4"].alive = False
+        state.players["p4"].death_day = 1
+        state.add_event(visibility=EventVisibility.PUBLIC, channel="system", text="投票结果：[4]位 被放逐出局。")
+        state.add_event(visibility=EventVisibility.PUBLIC, channel="system", text="[4]位 被放逐，请发表遗言。")
+        state.add_event(
+            visibility=EventVisibility.PUBLIC,
+            channel="speech",
+            speaker="p4",
+            text='女巫你有夜晚信息也能挂一票我，你们随便玩。',
+        )
+        state.day = 2
+        state.phase = Phase.WOLF_CHAT
+        compiler = VisibilityCompiler()
+
+        wolf_view = compiler.private_view(state, "p5")
+        public_state = compiler.public_state(state)
+        serialized = str(public_state) + str(wolf_view)
+
+        self.assertIsNone(wolf_view.get("night_hint"))
+        self.assertIsNone(wolf_view.get("witch_resources"))
+        self.assertNotIn("'role': 'WITCH'", serialized)
+        self.assertNotIn('role_label', serialized)
+        self.assertNotIn('death_causes', serialized)
+
     def test_private_event_visibility_matrix_across_roles(self) -> None:
         state = create_state_from_role_map(
             "classic-6",

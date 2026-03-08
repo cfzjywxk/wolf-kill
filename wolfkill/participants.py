@@ -43,6 +43,7 @@ class ParticipantAdapter(ABC):
         self.background = background
         self.last_sent_event_id: int = 0
         self.last_call_diagnostics: dict[str, Any] | None = None
+        self.last_call_exchange: dict[str, Any] | None = None
 
     @property
     def has_session(self) -> bool:
@@ -62,12 +63,19 @@ class ParticipantAdapter(ABC):
     def reset_state(self) -> None:
         self.last_sent_event_id = 0
         self.clear_last_call_diagnostics()
+        self.clear_last_call_exchange()
 
     def clear_last_call_diagnostics(self) -> None:
         self.last_call_diagnostics = None
 
     def set_last_call_diagnostics(self, **details: Any) -> None:
         self.last_call_diagnostics = details
+
+    def clear_last_call_exchange(self) -> None:
+        self.last_call_exchange = None
+
+    def set_last_call_exchange(self, **details: Any) -> None:
+        self.last_call_exchange = details
 
 
 class ParticipantInvocationError(RuntimeError):
@@ -275,7 +283,11 @@ class PromptJsonParticipant(ParticipantAdapter, ABC):
             raw_output = self._run_prompt(mode, prompt)
             provider_seconds = time.monotonic() - provider_started_at
         except subprocess.TimeoutExpired as exc:
+            self.set_last_call_exchange(mode=mode, prompt=prompt, raw_output=None, parsed_response=None, error=format_timeout_message(self.provider_label, self.timeout_seconds))
             raise ParticipantInvocationError(format_timeout_message(self.provider_label, self.timeout_seconds), kind="timeout") from exc
+        except Exception as exc:
+            self.set_last_call_exchange(mode=mode, prompt=prompt, raw_output=None, parsed_response=None, error=str(exc).strip() or exc.__class__.__name__, stdout=getattr(exc, "stdout", None), stderr=getattr(exc, "stderr", None))
+            raise
         if not raw_output.strip():
             raise ParticipantInvocationError(f"{self.provider_label} 返回空输出", kind="invalid_response")
         try:
@@ -305,8 +317,10 @@ class PromptJsonParticipant(ParticipantAdapter, ABC):
                 total_seconds=time.monotonic() - started_at,
                 **run_prompt_meta,
             )
+            self.set_last_call_exchange(mode=mode, prompt=prompt, raw_output=raw_output, parsed_response=response, parse_mode=parse_mode)
             return response
         except ValueError as exc:
+            self.set_last_call_exchange(mode=mode, prompt=prompt, raw_output=raw_output, parsed_response=None, error=str(exc).strip() or exc.__class__.__name__)
             raise ParticipantInvocationError(f"{self.provider_label} 返回的不是 JSON：{raw_output.strip()[:280]}", kind="invalid_response") from exc
 
     @abstractmethod
@@ -783,6 +797,9 @@ def _gameplay_instructions(mode: str, request: dict[str, Any]) -> list[str]:
     lines.append("=== 核心行为准则 ===")
     lines.append("你是一名经验丰富的狼人杀竞技玩家。你必须仔细阅读 private_view 中你的身份信息和所有最近历史事件，结合 public_state 中的存活情况进行推理。")
     lines.append("【读人方法】听逻辑链是否自洽；看发言中有效信息量；抓视角漏洞；观投票行为是否与发言一致；分析发言动机对谁有利。")
+    lines.append("【时序铁律】夜间行动先于当天白天发言。不要认可任何'昨晚验人/刀口/用药是为了验证今天白天发言'的说法，除非时间上真的成立。")
+    lines.append("【可见性铁律】如果公开发言只提到'女巫/预言家/神职'却没有点具体座位，不得把它当成明确身份暴露；只能当作情绪化指控或倾向判断。")
+    lines.append("【座次铁律】判断前置位、后置位、归票位时，必须基于当前座位顺序与当天发言顺序，不要把不靠后的座位硬说成归票位。")
     if role == "WOLF":
         lines.append("【狼人铁律】你的一切发言必须伪装成好人视角。绝不能暴露刀口目标、队友身份等私有信息。")
     else:

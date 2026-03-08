@@ -12,17 +12,8 @@
       ]
     },
     "p3": {
-      "type": "codex_cli",
-      "name": "Codex P3",
-      "background": "Use only visible information and return strict JSON.",
-      "sandbox": "read-only",
-      "config_overrides": [
-        "model_reasoning_effort=\"medium\""
-      ]
-    },
-    "p4": {
       "type": "claude_cli",
-      "name": "Claude P4",
+      "name": "Claude P3",
       "background": "Play cautiously, stay in character, and return strict JSON.",
       "model": "claude-sonnet-4-6",
       "effort": "medium",
@@ -33,16 +24,22 @@
         "HTTPS_PROXY": "http://127.0.0.1:7890"
       }
     },
+    "p4": {
+      "type": "kimi_cli",
+      "name": "Kimi P4",
+      "background": "Reason only from visible state and return strict JSON.",
+      "model": "kimi-code/kimi-for-coding"
+    },
     "p5": {
       "type": "kimi_cli",
       "name": "Kimi P5",
-      "background": "Reason only from visible state and return strict JSON.",
+      "background": "Play cautiously and return strict JSON.",
       "model": "kimi-code/kimi-for-coding"
     },
     "p6": {
       "type": "kimi_cli",
       "name": "Kimi P6",
-      "background": "Play cautiously and return strict JSON.",
+      "background": "Stay in character, use only visible information, and return strict JSON.",
       "model": "kimi-code/kimi-for-coding"
     }
   }
