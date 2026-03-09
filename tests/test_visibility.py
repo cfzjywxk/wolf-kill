@@ -180,6 +180,22 @@ class VisibilityTests(unittest.TestCase):
             visible_texts = {item["text"] for item in view["all_visible_events"] if item["visibility"] == "PRIVATE"}
             self.assertEqual(visible_texts, expected_texts, seat)
 
+    def test_seer_day_speech_includes_claim_constraints(self) -> None:
+        state = create_state_from_role_map(
+            "classic-6",
+            7,
+            {"p1": Role.WOLF, "p2": Role.WOLF, "p3": Role.SEER, "p4": Role.WITCH, "p5": Role.VILLAGER, "p6": Role.VILLAGER},
+        )
+        state.phase = Phase.DAY_SPEECH
+        state.seer_results['p3'] = [SeerInspection(day=1, target='p2', result='WOLF')]
+        compiler = VisibilityCompiler()
+
+        seer_view = compiler.private_view(state, 'p3')
+
+        self.assertIn('seer_claim_constraints', seer_view)
+        self.assertEqual(seer_view['seer_claim_constraints']['latest_inspection_target'], 'p2')
+        self.assertIn('早于第1天白天全部发言', seer_view['seer_claim_constraints']['timeline_note'])
+
     def test_incremental_private_events_remain_role_scoped(self) -> None:
         state = create_state_from_role_map(
             "classic-6",

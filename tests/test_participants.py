@@ -222,6 +222,38 @@ class ParticipantAdapterTests(unittest.TestCase):
         second_session = captured[1][captured[1].index("--session") + 1]
         self.assertEqual(first_session, second_session)
 
+    def test_seer_day_speech_prompt_includes_claim_timeline_constraints(self) -> None:
+        participant = KimiCliParticipant(name="Kimi Seer Constraint")
+        request = {
+            **self.speech_request,
+            "phase": "DAY_SPEECH",
+            "private_view": {
+                **self.speech_request["private_view"],
+                "role": "SEER",
+                "team": "VILLAGE",
+                "seer_results": [{"day": 1, "target": "p2", "result": "NOT_WOLF"}],
+                "seer_claim_constraints": {
+                    "latest_inspection_day": 1,
+                    "latest_inspection_target": "p2",
+                    "timeline_note": "你最近一次查验发生在第1夜，早于第1天白天全部发言。",
+                    "allowed_reason_examples": ["固定座位压力"],
+                    "forbidden_reason_examples": ["因为今天1号发言很空所以昨晚去验2号"],
+                },
+            },
+        }
+
+        def fake_run(command, **kwargs):
+            prompt = kwargs["input"]
+            self.assertIn("预言家验人时序约束", prompt)
+            self.assertIn("最近查验目标", prompt)
+            self.assertIn("因为今天1号发言很空所以昨晚去验2号", prompt)
+            return subprocess.CompletedProcess(command, 0, stdout='{"text":"ok"}', stderr="")
+
+        with patch("wolfkill.participants.subprocess.run", side_effect=fake_run):
+            response = participant.speak(request)
+
+        self.assertEqual(response["text"], "ok")
+
     def test_kimi_prompt_includes_wolf_strategy_and_online_game_hint(self) -> None:
         participant = KimiCliParticipant(name="Kimi Strategy")
         request = {**self.speech_request, "phase": "DAY_SPEECH", "private_view": {**self.speech_request["private_view"], "role": "WOLF", "team": "WOLF"}}

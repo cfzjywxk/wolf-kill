@@ -851,6 +851,21 @@ def _gameplay_instructions(mode: str, request: dict[str, Any]) -> list[str]:
                 ])
             else:
                 lines.append("5.【好人找狼】分析谁在划水、谁逻辑链断裂、谁排除了不该排除的人、谁投票和发言不一致。")
+            if role == "SEER" and isinstance(pv.get("seer_claim_constraints"), dict):
+                constraints = pv["seer_claim_constraints"]
+                lines.append("【预言家验人时序约束】如果你解释昨晚验人理由，只能引用当时已经存在的信息，不能拿今天白天才发生的发言倒推昨晚心路。")
+                timeline_note = str(constraints.get("timeline_note") or "").strip()
+                if timeline_note:
+                    lines.append(f"【本局时序提示】{timeline_note}")
+                latest_target = constraints.get("latest_inspection_target")
+                if latest_target:
+                    lines.append(f"【最近查验目标】{latest_target}。解释这次查验理由时，不得引用今天才出现的前置位发言、今天的对跳或今天的归票压力。")
+                allowed = constraints.get("allowed_reason_examples") or []
+                forbidden = constraints.get("forbidden_reason_examples") or []
+                if allowed:
+                    lines.append("【允许的验人理由示例】" + "、".join(str(item) for item in allowed))
+                if forbidden:
+                    lines.append("【禁止的验人理由示例】" + "、".join(str(item) for item in forbidden))
             lines.extend([
                 "【绝对禁止的发言】不要只说“我先观望/暂时没有看法/大家怎么看”这类空话。",
                 "你的每一句发言都应该包含信息量和明确立场。",

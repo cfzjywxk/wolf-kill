@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .models import GameState, Role, team_for_role
+from .models import GameState, Phase, Role, team_for_role
 
 
 class VisibilityCompiler:
@@ -85,6 +85,16 @@ class VisibilityCompiler:
             view["night_hint"] = {"wolf_target": state.current_night.wolf_target} if state.current_night.wolf_target is not None else None
         elif since_event_id == 0:
             view["night_hint"] = None
+        if player.role == Role.SEER and state.phase == Phase.DAY_SPEECH:
+            latest_inspection = next((item for item in reversed(state.seer_results.get(seat, [])) if item.day == state.day), None)
+            if latest_inspection is not None:
+                view["seer_claim_constraints"] = {
+                    "latest_inspection_day": latest_inspection.day,
+                    "latest_inspection_target": latest_inspection.target,
+                    "timeline_note": f"你最近一次查验发生在第{state.day}夜，早于第{state.day}天白天全部发言。解释这次验人理由时，不得引用第{state.day}天白天才出现的发言、对跳、归票压力或今天新增的站边信息。",
+                    "allowed_reason_examples": ["上一天的投票与发言", "已知死亡/平安夜结构", "固定座位压力", "零信息摸高压位"],
+                    "forbidden_reason_examples": ["因为今天1号发言很空所以昨晚去验2号", "为了验证刚才前置位的发言所以昨晚去验人", "为了看今天归票位是不是好人所以昨晚去验后置位"],
+                }
         if since_event_id > 0 and player.role == Role.SEER:
             view["seer_results"] = [item.to_dict() for item in state.seer_results.get(seat, [])]
         return view
